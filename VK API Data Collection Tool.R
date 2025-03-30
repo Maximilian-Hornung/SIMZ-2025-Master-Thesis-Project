@@ -5,7 +5,7 @@ library(httr2)
 library(jsonlite)
 library(tidyverse)
 
-# Load Functions ####
+# Load Custom Functions ####
 
 wall_get <- function(user_id, access_token, count){
   
@@ -79,15 +79,15 @@ users_get <- function(user_ids, access_token, fields = NULL){
   
   
   #iterate through the nested list structure
-  languages <- resp$response %>% 
+  languages <- resp$response |>
     map(function(x) {
       # Flatten nested elements
       x$personal$langs
-    }) %>% 
-    map(unlist) %>%
-    map_if(is.null, as.character) %>%
-    map(t) %>% 
-    map(as.data.frame) %>%
+    }) |>
+    map(unlist) |>
+    map_if(is.null, as.character) |>
+    map(t) |> 
+    map(as.data.frame) |>
     map(~add_column(.,temp = NA, .name_repair = 'minimal'))  %>% # this row is needed for the posts that do not have attachments
     bind_rows() |> 
     rename_with(~str_replace(.x, "^V", "Language")) |> 
@@ -95,14 +95,14 @@ users_get <- function(user_ids, access_token, fields = NULL){
   
   
   ##iterate through the main list structure
-  df <- resp$response %>% 
-    map(unlist) %>%
-    map_if(is.null, as.character) %>%
-    map(t) %>% 
-    map(as.data.frame) %>%
-    map(~add_column(.,temp = NA, .name_repair = 'minimal'))  %>% # this row is needed for the posts that do not have attachments
-    bind_rows() %>%
-    select(-contains('personal.langs'), -contains('universities'), -contains('university'), -contains('faculty'), -contains('graduation')) %>%
+  df <- resp$response |> 
+    map(unlist) |>
+    map_if(is.null, as.character) |>
+    map(t) |> 
+    map(as.data.frame) |>
+    map(~add_column(.,temp = NA, .name_repair = 'minimal'))  |> # this row is needed for the posts that do not have attachments
+    bind_rows() |>
+    select(-contains('personal.langs'), -contains('universities'), -contains('university'), -contains('faculty'), -contains('graduation')) |>
     bind_cols(languages) |>  #bind all the columns together
     select(-any_of("temp"))
   
@@ -228,7 +228,7 @@ alters_get <- function(df, method, access_token = access_token, n_user, degree_1
     Sys.sleep(0.5)
     
     
-    cat(paste('Finished retrieving alter', i, 'of', total_alters, 'with method',deparse(substitute(method)),': '))
+    cat(paste('Finished retrieving alter', i, 'of', total_alters, 'with method',deparse(substitute(method)),'| '))
     
   }
   
@@ -289,7 +289,7 @@ ego_friends <- friends_get(user_id = ego$id, access_token = access_token, n_user
    # Pause to avoid hitting rate limits
    Sys.sleep(0.3)
    
-   cat(paste('Finished retrieving wall posts for alter', i, 'of', total_user, '\n'))
+   cat(paste('Finished retrieving wall posts for user', i, 'of', total_user, '\n'))
  }
  
  
@@ -319,7 +319,7 @@ ego_friends <- friends_get(user_id = ego$id, access_token = access_token, n_user
 ## Set Arguments ####
 
 #setwd
-setwd("C:/Users/hornu/OneDrive/Master Social Scientific Data Analysis/Courses/SIMZ-2025 - Master Thesis Course/20250206 Spring Thesis Work/Data Collection/data") #location where the file is being saved
+setwd("C:/Users/hornu/OneDrive/Master Social Scientific Data Analysis/Courses/SIMZ-2025 - Master Thesis Course/20250206 Spring Thesis Work/VK Network Data") #location where the file is being saved
 
 ## VK access token 
 #browseURL("https://vkhost.github.io/") #to get you access token
@@ -327,7 +327,7 @@ setwd("C:/Users/hornu/OneDrive/Master Social Scientific Data Analysis/Courses/SI
 
 access_token <- "vk1.a.7RCGumxfITyEglGdOQwSnngXdJGoFhuQKG1uPZoDHVTYu6ntXdiCk6YpG72IXV1voG0KxiscUCZPM1BgAt7gNnx1nPWeQ6esegeiCs7oCxGD-3so9hYOO40WJxeSq33BxQnNLHhGolky4qeo4Evcpzg5_aaWZDuXZjZmhrRP1sx6ufAvdI4ZUacFhELTZLRhiewyEi4MI-J-NqAOcA6j0g"
 
-user_id <- ""  # bilingual user id
+user_id <- "850793471"  # bilingual user id
 
 n_user <- 50   # this argument decides how many friends are being scraped and is multiplied by 100 (e.g. 50 * 100 = max 5000 friends)
 
