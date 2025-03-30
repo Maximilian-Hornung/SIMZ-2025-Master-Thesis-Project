@@ -88,7 +88,7 @@ users_get <- function(user_ids, access_token, fields = NULL){
     map_if(is.null, as.character) |>
     map(t) |> 
     map(as.data.frame) |>
-    map(~add_column(.,temp = NA, .name_repair = 'minimal'))  %>% # this row is needed for the posts that do not have attachments
+    map(~add_column(.,temp = NA, .name_repair = 'minimal'))  |> # this row is needed for the posts that do not have attachments
     bind_rows() |> 
     rename_with(~str_replace(.x, "^V", "Language")) |> 
     select(-any_of("temp"))
@@ -337,7 +337,8 @@ wall_count <- 100 # how many user posts are being scraped (note: the API method 
 
 
 ## Execute Function ####
-ego_network_get(user_id = user_id, access_token = access_token, n_user = n_user, degree_1.5 = TRUE, wall_count = wall_count, save_as_RDS = T) 
+
+ego_network_get(user_id = user_id, access_token = access_token, n_user = n_user, degree_1.5 = TRUE, wall_count = wall_count, save_as_RDS = TRUE) 
  
 
 
