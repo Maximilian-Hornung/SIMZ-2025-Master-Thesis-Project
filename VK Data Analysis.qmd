@@ -1,0 +1,3024 @@
+---
+title: "Master Thesis Data Analysis"
+format: pdf
+editor: visual
+editor_options: 
+  chunk_output_type: console
+---
+
+# Set working environment
+
+```{r load libraries and data}
+#| message: false
+#| warning: false
+#| echo: false
+
+# load libraries
+
+library(tidyverse)
+library(igraph)
+library(ggraph)
+library(cld2) 
+library(gt)
+library(glue)
+library(igraph)
+library(network)
+library(intergraph)
+library(sna)
+library(ergm)
+library(broom)
+library(patchwork)
+library(ggpubr)
+library(ergMargins)
+library(stringr)
+library(textclean)
+library(qdapRegex)
+
+# set wd
+setwd("C:/Users/hornu/OneDrive/Master Social Scientific Data Analysis/Courses/SIMZ-2025 - Master Thesis Course/20250206 Spring Thesis Work/VK Network Data")
+
+
+# load data
+ego_network_list <- readRDS("ego_network_list.rds")
+
+# save data
+#saveRDS(ego_network_list, file = "ego_network_list.rds")
+```
+
+# Methodology: Data Cleaning and Preparation
+
+```{r load custom functions for data wrangling}
+
+
+## create language labeling function #####
+get_language_labels <- function(ego_network_list) {
+  
+  # function to clean text
+clean_text <- function(text, emoji_regex) {
+  text |>
+    str_remove_all("\\[#alias\\|.*?\\|.*?\\]") |>          # [#alias|link|url]
+    str_remove_all("\\[.*?\\|.*?\\]") |>                   # [id123|Name]
+    str_remove_all("\\[.*?\\]") |>                         # [alias]
+    str_remove_all("@\\w+") |>                             # mentions
+    str_remove_all("#\\S+") |>                             # hashtags
+    str_remove_all("http[s]?://\\S+") |>                   # URLs
+    str_remove_all("vk\\.cc/\\S+") |>                      # VK shortlinks
+    str_remove_all(emoji_regex) |>                         # emojis
+    rm_emoticon() |>                                       # emoticons
+    str_replace_all("\\\\", "") |>                         # backslashes
+    str_remove_all("<[^>]+>") |>                           # HTML tags
+    str_replace_all("[\t\r\n]", " ") |>                    # tabs/newlines
+    str_remove_all("\\([^\\)]*\\)|\\[[^\\]]*\\]") |>       # junk brackets/parentheses
+    str_remove_all("[!\\-:]{2,}|[:;]{1,2}\\S*") |>          # broken encodings
+    str_replace_all("%[A-Fa-f0-9]{2}", "") |>              # URL-encoded garbage
+   # str_replace_all("[^\\x20-\\x7Eа-яА-ЯёЁäöüÄÖÜßẞ\\p{L}\\p{N}\\s]", "") |>  
+    str_replace_all("\\s+", " ") |>                        # collapse spaces
+    str_squish()                                           # trim ends
+}
+
+
+  
+  # 1.5-degree edge list
+  ego_id <- ego_network_list[["attr_list"]] |>
+    filter(is_ego == 1) |>
+    pull(to)
+
+  edge_list_1.5_degree <- ego_network_list[["edge_list"]] |>
+    left_join(ego_network_list[["attr_list"]], by = "to") |>
+    filter(from != ego_id) |>
+    filter(if_any(matches("deactivated"), ~is.na(.))) |>
+    select(from, to) |>
+    filter(!is.na(from) & !is.na(to) & from != to) |>
+    distinct()
+
+  # Emoji regex
+  emoji_regex <- paste0(
+    "(",
+    "[\U0001F600-\U0001F64F]|[\U0001F300-\U0001F5FF]|[\U0001F680-\U0001F6FF]",
+    "|[\U0001F1E0-\U0001F1FF]|[\U00002700-\U000027BF]|[\U0001F900-\U0001F9FF]",
+    "|[\U0001FA70-\U0001FAFF]|[\U00002600-\U000026FF]|[\U0001F018-\U0001F270]",
+    "|[\U000024C2-\U0001F251]|[\U0001F1F2-\U0001F1F4]{1,2}|[\U0001F1E6-\U0001F1FF]{2}",
+    "|\u200D|\u2640|\u2642|\uFE0F|\u23CF|\u23E9|\u231A|\uD83C[\uDFFB-\uDFFF]", 
+    "|[\U0001F7E0-\U0001F7EF]",
+    ")"
+  )
+
+  # Clean text columns
+  wall_posts_cleaned <- ego_network_list[["wall_posts"]] |>
+    mutate(
+      post_text_clean = clean_text(post_text, emoji_regex),
+      attachment_text_clean = clean_text(attachment_text, emoji_regex),
+      link_title_clean = clean_text(link.title, emoji_regex)
+    )
+
+  # Detect languages
+  wall_posts_labeled <- wall_posts_cleaned |>
+    mutate(
+      post_text_cld2 = cld2::detect_language(text = post_text_clean, plain_text = FALSE),
+      attachment_text_cld2 = cld2::detect_language(text = attachment_text_clean, plain_text = FALSE),
+      link_title_cld2 = cld2::detect_language(text = link_title_clean, plain_text = FALSE),
+      link_source = case_when(
+        str_detect(link.caption, "\\.(ru|su|рф|rf|by|kz|ua|kg|md|am|az|tj|tm|uz)\\b") ~ "ru",
+        str_detect(link.caption, "\\.(de|ch|at)\\b") ~ "de",
+        TRUE ~ NA_character_
+      )
+    )
+
+  # Join user attributes 
+  wall_posts_labeled <- wall_posts_labeled |>
+    left_join(
+      ego_network_list[["attr_list"]] |>
+        rename(user_id = to) |>
+        select(user_id, Language1, Language2, country.title),
+      by = "user_id"
+    )
+
+  # Assign language labels
+  wall_posts_lang_label <- wall_posts_labeled |>
+    mutate(
+      lang_detected = case_when(
+        post_text_cld2 == "ru" | attachment_text_cld2 == "ru" ~ "Russian",
+        post_text_cld2 == "de" | attachment_text_cld2 == "de" ~ "German",
+        is.na(post_text_cld2) & is.na(attachment_text_cld2) ~ "Unknown",
+        TRUE ~ "Other"
+      )
+    ) |>
+    group_by(user_id) |>
+    mutate(
+      lang = case_when(
+        "German" %in% lang_detected & "Russian" %in% lang_detected ~ "Bilingual",
+        "German" %in% lang_detected ~ "German",
+        "Russian" %in% lang_detected ~ "Russian",
+        "Other" %in% lang_detected ~ "Other",
+        TRUE ~ "Unknown"
+      )
+    ) |>
+    ungroup() |>
+    mutate(
+      lang = case_when(
+        lang == "Unknown" & Language1 == "Русский" ~ "Russian",
+        lang == "Unknown" & Language1 == "Deutsch" ~ "German",
+        lang == "Unknown" & (
+          (Language1 == "Deutsch" & Language2 == "Русский") |
+            (Language1 == "Русский" & Language2 == "Deutsch")
+        ) ~ "Bilingual",
+        lang == "Unknown" & is.na(Language1) ~ "Unknown",
+        lang == "Unknown" & !Language1 %in% c("Русский", "Deutsch") ~ "Other",
+        TRUE ~ lang
+      ),
+      lang = case_when(
+        lang == "Unknown" & country.title == "Russia" ~ "Russian",
+        lang == "Unknown" & country.title == "Germany" ~ "German",
+        lang == "Unknown" & is.na(country.title) ~ "Unknown",
+        lang == "Unknown" & !country.title %in% c("Germany", "Russia") ~ "Other",
+        TRUE ~ lang
+      )
+    ) |>
+    mutate(to = user_id) 
+
+  # Final attribute list
+  attr_list <- ego_network_list[["attr_list"]] |>
+    left_join(wall_posts_lang_label, by = "to") |>
+    filter(if_any(matches("deactivated"), ~is.na(.))) |>
+    mutate(
+      time_absent = as.numeric(difftime(time_data_collection, last_seen.time, units = "mins")),
+      lang = if_else(is.na(lang), "Other", lang),
+      time_absent = if_else(is.na(time_absent), mean(time_absent, na.rm = TRUE), time_absent)
+    )
+
+  return(list(
+    edge_list_1.5_degree = edge_list_1.5_degree,
+    attr_list = attr_list,
+    wall_posts_labeled = wall_posts_lang_label
+  ))
+}
+
+
+
+get_igraph <-  function(network_labeled, simplify = TRUE, largest_component = TRUE) {
+  
+edge_list_1.5_degree <- network_labeled[["edge_list_1.5_degree"]]
+attr_list <- network_labeled[["attr_list"]]
+  
+# create the graph from the edge list 
+g <- graph_from_data_frame(edge_list_1.5_degree, directed = FALSE)
+
+# assign node attributes
+V(g)$language <- attr_list[match(V(g)$name,attr_list$to),]$lang
+V(g)$sex <- attr_list[match(V(g)$name,attr_list$to),]$sex
+V(g)$time_absent <- attr_list[match(V(g)$name,attr_list$to),]$time_absent
+betweenness_centrality <- igraph::betweenness(g, directed = FALSE,  weights = NULL,  normalized = TRUE)
+V(g)$betweenness <- betweenness_centrality
+degree_centrality <- igraph::degree(g, normalized = TRUE)
+V(g)$degree <- degree_centrality
+closeness_centrality <- igraph::closeness(g, normalized = TRUE)
+V(g)$closeness <- closeness_centrality
+
+if(simplify == T){
+ g <- simplify(
+  g,
+  remove.multiple = TRUE,
+  remove.loops = TRUE,
+  edge.attr.comb = igraph_opt("edge.attr.comb")
+)
+
+ }
+
+
+# keep only largest component 
+  if(largest_component == TRUE){
+# Number of connected components
+scc <- igraph::components(g)
+num_scc <- scc$no
+
+no_max_scc <- max(scc$csize) # largest one
+no_min_scc <- min(scc$csize) # smallest one
+
+scc$csize[scc$csize > 1] # only components that have more than 1 member
+
+# Get largest connected component
+largest_component <- which.max(scc$csize)  
+
+# Create a subgraph containing only the largest connected component
+g <- induced_subgraph(g, which(scc$membership == largest_component))
+
+cat(glue("For the Language-core network, we observe {num_scc} connected components, of which the largest one contains {no_max_scc} nodes, and the smallest one {no_min_scc}.\n"))
+}
+
+return(g)
+
+}
+
+```
+
+```{r clean data}
+#| message: false
+#| warning: false
+#| echo: false
+
+
+ego_network_list_duplicated<- ego_network_list |> 
+  map(\(x) {
+    x[["attr_list"]] |> 
+      filter(is_ego == "1") |>  # Filter rows where is_ego is 1
+      pull(to)
+    })  |> 
+  unlist() |> 
+  duplicated() # no duplicates
+
+n_duplicates <- sum(TRUE %in% ego_network_list_duplicated)
+
+cat(glue("For the Language-core network list, we observe {n_duplicates} duplicated egocentric networks"))
+
+#ego_network_list <- ego_network_list[-which(ego_network_list_duplicated == TRUE)] # remove duplicates
+
+
+```
+
+```{r get language labels}
+#| message: false
+#| warning: false
+#| echo: false
+
+# get language labels
+networks_labeled <- lapply(ego_network_list, get_language_labels)
+
+```
+
+```{r get dataset descriptives}
+#| message: false
+#| warning: false
+#| echo: false
+
+# contacts 
+total_num_contacts <- networks_labeled  |> 
+  map(\(x) {
+    x[["edge_list_1.5_degree"]]$to
+  }) |> 
+  unlist() |> 
+  length()
+
+cat(glue("We observe a total of {total_num_contacts} edges within the egocentric network list"))
+
+
+total_num_unique_contacts <- networks_labeled |> 
+  map(\(x) x[["attr_list"]]$to) |> 
+  unlist() |> 
+  unique() |> 
+  length()
+      
+cat(glue("We observe a total of {total_num_unique_contacts} unique contacts within each of the egocentric network list"))
+
+# posts
+total_num_posts <- networks_labeled |> 
+  map(\(x) {
+    x[["wall_posts_labeled"]]$post_text
+  }) |> 
+  unlist() |> 
+  length()
+
+
+```
+
+```{r check language labels}
+#| message: false
+#| warning: false
+#| echo: false
+
+langs_summary <- networks_labeled |> 
+  map("attr_list") |>        
+  bind_rows() |> 
+  filter(!duplicated(to)) |>  # keep only the first occurrence of each unique `to`
+  group_by(Language = lang) |> 
+  summarise(n = n(), .groups = "drop") |> 
+  mutate(
+    Percentage = round(100 * n / sum(n), 0),
+    Total = sum(n)
+  )
+
+cat(glue("After applying the Language-labeling function, we observe {langs_summary[5, 2]} or {langs_summary[5, 3]}% of users utilizing Unknown languages within the full VK sample of {langs_summary[4,4]} users."))
+
+print(langs_summary)
+
+
+```
+
+```{r validate language labels}
+
+
+## manually code network graph 48
+# initialize an empty df with user ids
+attr_df <- networks_labeled[[48]]$attr_list |> 
+  select(to) |> 
+  arrange(to) |> 
+  mutate(lang_manual = NA_character_)  # placeholder for manual input
+
+# create the df with the information for labeling
+wall_posts_df_unlabeled <- networks_labeled[[48]]$wall_posts_labeled |>                
+  select(user_id, post_text, attachment_text, Language1, Language2, country.title) |> 
+  arrange(user_id)
+  
+
+# attr_df <- edit(attr_df) # manually code
+
+# write.csv(attr_df, "manual_lang_labels_network_48.csv", row.names = FALSE) # save manually coded df
+attr_df <- read.csv("manual_lang_labels_network_48.csv", stringsAsFactors = FALSE) |> 
+  mutate(to = as.character(to))
+
+# see how many labels match
+attr_df_comparison <- networks_labeled[[48]]$attr_list |> 
+  select(to, lang) |> 
+  left_join(attr_df, by = "to") |> 
+  summarise(correct_labels = sum(lang == lang_manual),
+            n_labels = n(), 
+            percentage_correct = round((correct_labels/n_labels)*100), 1)
+
+cat(glue("Comparing the manually coded language labels with the labels of the language label function, we observe that out of {attr_df_comparison[1, 2]} users the language labeling function correctly coded {attr_df_comparison[1, 1]} ({attr_df_comparison[1, 3]}%) of the users' language repertoire."))
+
+
+
+
+
+set.seed(123) 
+
+# Extract and bind all attribute lists
+unique_users  <- networks_labeled |>
+  map("attr_list") |>
+  bind_rows(.id = "network_id") |>  # keep track of which network each user came from
+  filter(!duplicated(to))
+
+# Randomly sample 200 users
+sampled_users <- unique_users |> 
+  slice_sample(n = 200)
+
+
+wall_posts  <- networks_labeled |>
+  map("wall_posts_labeled") |>
+  bind_rows(.id = "network_id")
+
+# create the df with the information for labeling
+attr_df_manual <- sampled_users |> 
+  arrange(to) |> 
+  select(network_id,user_id = to) |> 
+  mutate(lang_manual = NA_character_)
+
+# create the df with the information for labeling
+wall_posts_df_unlabeled <- networks_labeled |>
+  map("wall_posts_labeled") |>
+  bind_rows(.id = "network_id")|>   
+  filter(user_id %in% attr_df_manual$user_id) |> 
+  select(user_id, post_text, attachment_text, Language1, Language2, country.title) |> 
+  arrange(user_id)
+
+# attr_df_manual<- edit(attr_df_manual) # manually code
+# write.csv(attr_df_manual, "manual_lang_labels_200_random.csv", row.names = FALSE) # save manually coded df
+attr_df <- read.csv("manual_lang_labels_200_random.csv", stringsAsFactors = FALSE) |> 
+  mutate(to = as.character(to))
+
+
+
+#combine manually coded with automatically coded
+attr_df_combined <- sampled_users |> 
+  arrange(to) |> 
+  select(network_id,user_id = to, lang) |> 
+  left_join(attr_df_manual, by = "user_id") |> 
+    slice_head(n = 100) |>
+  select(lang, lang_manual)
+  
+
+
+# calculate Intercoder Reliability
+  
+library(irr)
+kappa_result <- kappa2(attr_df_combined, weight = "unweighted")
+
+
+```
+
+# Study 1: Social Network Analysis
+
+```{r convert to igraph and ggraph object}
+#| message: false
+#| warning: false
+#| echo: false
+
+
+## graph plotting function ####
+
+ggraph_get <- function(g){
+  
+set.seed(126)
+# Define color scheme once, with names matching levels
+lang_colors <- c(
+  "Bilingual" = "forestgreen",
+  "German" = "royalblue",
+  "Russian" = "firebrick",
+  "Other" = "darkviolet",
+  "Unknown" = "grey60"
+)
+
+# Generate the plot
+ggraph_plot <- ggraph(g, layout = 'fr') +
+  geom_edge_link(color = "grey80", alpha = 0.6) +
+  geom_node_point(
+    aes(color = language, size = betweenness),
+    show.legend = TRUE
+  ) +
+  scale_color_manual(
+    values = lang_colors,
+    name = "Language Repertoire",
+    drop = FALSE  # Ensures missing categories are still shown in the legend
+  ) +
+  scale_size_continuous(
+    name = "Betweenness Centrality",
+    range = c(1, 6)
+  ) +
+   theme_graph(background = 'white', legend.position="none") 
+  # annotate(
+  #   "text",
+  #   x = Inf,
+  #   y = -Inf,
+  #   label = "Data collected via VK API and visualized with ggraph ('fr' layout)",
+  #   hjust = 1.1,
+  #   vjust = -0.8,
+  #   size = 3,
+  #   color = "black",
+  #   fontface = "italic"
+  # ) +
+  # theme(
+  #   legend.position = "bottom",
+  #   legend.box = "vertical",
+  #   legend.title = element_text(size = 9),
+  #   legend.text = element_text(size = 8)
+  # )
+
+  # ggraph_plot <- ggraph_plot +
+  #  geom_node_text(aes(label = name), repel = TRUE, size = 2.5, color = "black")
+
+
+return(ggraph_plot)
+}
+
+
+
+igraph <- lapply(networks_labeled, get_igraph) # convert to igraph
+ggraph <- lapply(igraph, ggraph_get) # convert to igraph
+
+
+```
+
+```{r explorative network visualizations}
+#| message: false
+#| warning: false
+#| echo: false
+
+# visualize all the network graphs  
+#walk(ggraph, print) 
+
+#multilingual_networks <- list(igraph[[2]], igraph[[4]], igraph[[5]], igraph[[6]], igraph[[7]], igraph[[8]], igraph[[9]],  igraph[[10]], igraph[[11]], igraph[[15]], igraph[[16]], igraph[[24]], igraph[[27]], igraph[[30]], igraph[[31]], igraph[[32]], igraph[[33]], igraph[[34]],  igraph[[35]], igraph[[36]], igraph[[38]], igraph[[40]], igraph[[43]],  igraph[[48]]) 
+```
+
+```{r manually clean data}
+
+## clean Unknown category for bilingual networks 
+
+# clean language labels for second network 
+lang_updates <- networks_labeled[[2]]$attr_list |> 
+  filter(lang == "Unknown") |> 
+  mutate(lang = case_when(
+    to == 15026242 ~ "Russian",
+    to == 408989993 ~ "German",
+    to == 449187876 ~ "German",
+    TRUE ~ lang
+  ))
+
+networks_labeled[[2]]$attr_list <- rows_update(
+  networks_labeled[[2]]$attr_list, 
+  lang_updates, 
+  by = "to"
+)
+
+# clean language labels for [[4]]
+networks_labeled[[4]]$attr_list |> 
+  filter(lang == "Unknown") |> 
+  nrow() #34 Unknown 
+
+
+
+# clean language labels for [[5]]
+lang_updates <- networks_labeled[[5]]$attr_list |> 
+  filter(lang == "Unknown") |> 
+  mutate(lang = case_when(
+    to == 350395279 ~ "German",
+    to == 551795254 ~ "Russian",
+    TRUE ~ lang
+  ))
+
+networks_labeled[[5]]$attr_list <- rows_update(
+  networks_labeled[[5]]$attr_list, 
+  lang_updates, 
+  by = "to"
+)
+
+
+# clean language labels for [[6]]
+lang_updates <- networks_labeled[[6]]$attr_list |> 
+  filter(lang == "Unknown") |> 
+  mutate(lang = case_when(
+    to == 550498052 ~ "German",
+    to == 550509790 ~ "German",
+    to == 832392906 ~ "German",
+    TRUE ~ lang
+  ))
+
+networks_labeled[[6]]$attr_list <- rows_update(
+  networks_labeled[[6]]$attr_list, 
+  lang_updates, 
+  by = "to"
+)
+
+
+# clean language labels for [[7]]
+lang_updates <- networks_labeled[[7]]$attr_list |> 
+  filter(lang == "Unknown") |> 
+  mutate(lang = case_when(
+    to == 660536119 ~ "Russian",
+    to == 815376363 ~ "Other",
+    to == 886368403 ~ "German",
+    to == 1018535949 ~ "Russian",
+    TRUE ~ lang
+  ))
+
+networks_labeled[[7]]$attr_list <- rows_update(
+  networks_labeled[[7]]$attr_list, 
+  lang_updates, 
+  by = "to"
+)
+
+
+# clean language labels for [[8]]
+lang_updates <- networks_labeled[[8]]$attr_list |> 
+  filter(lang == "Unknown") |> 
+  mutate(lang = case_when(
+    to == 711386878 ~ "Russian",
+    to == 875304400 ~ "Other",
+    TRUE ~ lang
+  ))
+
+networks_labeled[[8]]$attr_list <- rows_update(
+  networks_labeled[[8]]$attr_list, 
+  lang_updates, 
+  by = "to"
+)
+
+
+
+# clean language labels for [[9]]
+lang_updates <- networks_labeled[[9]]$attr_list |> 
+  filter(lang == "Unknown") |> 
+  mutate(lang = case_when(
+    to == 449187876 ~ "German",
+    to == 461266439 ~ "Other",
+    to == 578180210 ~ "Bilingual",
+    to == 669658623 ~ "German",
+    to == 827169889 ~ "German",
+    to == 874838020 ~ "German",
+    TRUE ~ lang
+  ))
+
+networks_labeled[[9]]$attr_list <- rows_update(
+  networks_labeled[[9]]$attr_list, 
+  lang_updates, 
+  by = "to"
+)
+
+# clean language labels for [[11]]
+lang_updates <- networks_labeled[[11]]$attr_list |> 
+  filter(lang == "Unknown") |> 
+  mutate(lang = case_when(
+    to == 665933218 ~ "Russian",
+    to == 805852999 ~ "Russian",
+    to == 815376363 ~ "Other",
+    TRUE ~ lang
+  ))
+
+networks_labeled[[11]]$attr_list <- rows_update(
+  networks_labeled[[11]]$attr_list, 
+  lang_updates, 
+  by = "to"
+)
+
+
+
+
+# clean language labels for [[15]]
+lang_updates <- networks_labeled[[15]]$attr_list |> 
+  filter(lang == "Unknown") |> 
+  mutate(lang = case_when(
+    to == 470847316 ~ "Russian",
+    to == 807374984 ~ "Russian",
+    to == 816359670 ~ "Russian",
+    TRUE ~ lang
+  ))
+
+networks_labeled[[15]]$attr_list <- rows_update(
+  networks_labeled[[15]]$attr_list, 
+  lang_updates, 
+  by = "to"
+)
+
+
+# clean language labels for [[16]]
+lang_updates <- networks_labeled[[16]]$attr_list |> 
+  filter(lang == "Unknown") |> 
+  mutate(lang = case_when(
+    to == 209416921 ~ "German",
+    to == 290362614 ~ "Bilingual",
+    TRUE ~ lang
+  ))
+
+networks_labeled[[16]]$attr_list <- rows_update(
+  networks_labeled[[16]]$attr_list, 
+  lang_updates, 
+  by = "to"
+)
+
+
+# clean language labels for [[24]]
+lang_updates <- networks_labeled[[24]]$attr_list |> 
+  filter(lang == "Unknown") |> 
+  mutate(lang = case_when(
+    to == 633527039 ~ "German",
+    to == 653835601 ~ "German",
+    to == 702739723 ~ "Bilingual",
+    to == 708324747 ~ "German",
+    to == 779931908 ~ "Bilingual",
+    to == 785537337 ~ "German",
+    TRUE ~ lang
+  ))
+
+networks_labeled[[24]]$attr_list <- rows_update(
+  networks_labeled[[24]]$attr_list, 
+  lang_updates, 
+  by = "to"
+)
+
+
+# clean language labels for [[30]]
+lang_updates <- networks_labeled[[30]]$attr_list |> 
+  filter(lang == "Unknown") |> 
+  mutate(lang = case_when(
+    to == 573013824 ~ "German",
+    to == 615812023 ~ "German",
+    to == 719293859 ~ "German",
+    to == 722351191 ~ "German",
+    TRUE ~ lang
+  ))
+
+networks_labeled[[30]]$attr_list <- rows_update(
+  networks_labeled[[30]]$attr_list, 
+  lang_updates, 
+  by = "to"
+)
+
+
+# clean language labels for [[31]]
+lang_updates <- networks_labeled[[31]]$attr_list |> 
+  filter(lang == "Unknown") |> 
+  mutate(lang = case_when(
+    to == 280642920 ~ "Russian",
+    to == 573310336 ~ "Russian",
+    to == 578146844 ~ "Russian",
+    to == 649464485 ~ "Other",
+    TRUE ~ lang
+  ))
+
+networks_labeled[[31]]$attr_list <- rows_update(
+  networks_labeled[[31]]$attr_list, 
+  lang_updates, 
+  by = "to"
+)
+
+
+# clean language labels for [[32]]
+lang_updates <- networks_labeled[[32]]$attr_list |> 
+  filter(lang == "Unknown") |> 
+  mutate(lang = case_when(
+    to == 348518211 ~ "Bilingual",
+    to == 633527039 ~ "Bilingual",
+    to == 649464485 ~ "Other",
+    TRUE ~ lang
+  ))
+
+networks_labeled[[32]]$attr_list <- rows_update(
+  networks_labeled[[32]]$attr_list, 
+  lang_updates, 
+  by = "to"
+)
+
+
+
+# clean language labels for [[33]]
+lang_updates <- networks_labeled[[33]]$attr_list |> 
+  filter(lang == "Unknown") |> 
+  nrow() # 26 Unknown
+
+
+
+# clean language labels for [[34]]
+lang_updates <- networks_labeled[[34]]$attr_list |> 
+  filter(lang == "Unknown") |> 
+  mutate(lang = case_when(
+    to == 299981598 ~ "Other",
+    to == 364716232 ~ "Bilingual",
+    to == 377881514 ~ "Other",
+    to == 384510489 ~ "Russian",
+    to == 397202420 ~ "German",
+    to == 649464485 ~ "Other",
+    to == 721249001 ~ "German",
+    to == 779931908 ~ "Bilingual",
+    TRUE ~ lang
+  ))
+
+networks_labeled[[34]]$attr_list <- rows_update(
+  networks_labeled[[34]]$attr_list, 
+  lang_updates, 
+  by = "to"
+)
+
+
+# clean language labels for [[35]]
+lang_updates <- networks_labeled[[35]]$attr_list |> 
+  filter(lang == "Unknown") |> 
+  mutate(lang = case_when(
+    to == 482176325 ~ "German",
+    to == 493489058 ~ "German",
+    to == 528907547~ "Bilingual",
+    to == 738756789 ~ "German",
+    to == 768727115 ~ "German",
+    to == 855191517 ~ "German",
+    to == 885028765 ~ "Bilingual",
+    to == 1029178809 ~ "German",
+    TRUE ~ lang
+  ))
+
+networks_labeled[[35]]$attr_list <- rows_update(
+  networks_labeled[[35]]$attr_list, 
+  lang_updates, 
+  by = "to"
+)
+
+
+# clean language labels for [[36]]
+lang_updates <- networks_labeled[[36]]$attr_list |> 
+  filter(lang == "Unknown") |> 
+  mutate(lang = case_when(
+    to == 702739723 ~ "Bilingual",
+    TRUE ~ lang
+  ))
+
+networks_labeled[[36]]$attr_list <- rows_update(
+  networks_labeled[[36]]$attr_list, 
+  lang_updates, 
+  by = "to"
+)
+
+
+# clean language labels for [[38]]
+lang_updates <- networks_labeled[[38]]$attr_list |> 
+  filter(lang == "Unknown") |> 
+  mutate(lang = case_when(
+    to == 291664362 ~ "German",
+    to == 292003311 ~ "German",
+    to == 292003311 ~ "German",
+    to == 299717467 ~ "German",
+    to == 323915652 ~ "German",
+    to == 338810987 ~ "German",
+    to == 344567943 ~ "Bilingual",
+    to == 348361069 ~ "German",
+    to == 371649486 ~ "Russian",
+    to == 413880973 ~ "German",
+    to == 437454295 ~ "German",
+    to == 708832907 ~ "German",
+    to == 293134111 ~ "German",
+    TRUE ~ lang
+  ))
+
+networks_labeled[[38]]$attr_list <- rows_update(
+  networks_labeled[[38]]$attr_list, 
+  lang_updates, 
+  by = "to"
+)
+
+
+# clean language labels for [[43]]
+lang_updates <- networks_labeled[[43]]$attr_list |> 
+  filter(lang == "Unknown") |> 
+  mutate(lang = case_when(
+    to == 751405961 ~ "Other",
+    to == 756793755 ~ "Other",
+    to == 875722325~ "Other",
+    TRUE ~ lang
+  ))
+
+networks_labeled[[43]]$attr_list <- rows_update(
+  networks_labeled[[43]]$attr_list, 
+  lang_updates, 
+  by = "to"
+)
+
+
+
+# clean language labels for [[48]]
+lang_updates <- networks_labeled[[48]]$attr_list |> 
+  filter(lang == "Unknown") |> 
+  mutate(lang = case_when(
+    to == 656102646 ~ "Russian",
+    to == 877705809 ~ "Bilingual",
+    TRUE ~ lang
+  ))
+
+networks_labeled[[48]]$attr_list <- rows_update(
+  networks_labeled[[48]]$attr_list, 
+  lang_updates, 
+  by = "to"
+)
+
+
+```
+
+```{r store and convert cleaned data to igraph and ggraph object}
+#| message: false
+#| warning: false
+#| echo: false
+
+# store multilingual and cleaned networks for ERGM modeling
+multilingual_networks_cleaned <- list(networks_labeled[[2]], networks_labeled[[5]], networks_labeled[[6]], networks_labeled[[7]], networks_labeled[[8]], networks_labeled[[9]], networks_labeled[[10]], networks_labeled[[11]], networks_labeled[[15]], networks_labeled[[16]], networks_labeled[[24]], networks_labeled[[27]], networks_labeled[[30]], networks_labeled[[31]], networks_labeled[[32]], networks_labeled[[34]],  networks_labeled[[35]], networks_labeled[[36]], networks_labeled[[38]], networks_labeled[[40]], networks_labeled[[48]])  
+
+igraph_clean <- lapply(multilingual_networks_cleaned, get_igraph) # convert to igraph
+ggraph_clean <- lapply(igraph_clean, function(x) {
+  graph_plot(x) + theme(legend.position = "none")
+}) # convert to ggraph
+
+
+```
+
+```{r cleaned network data visualization and classification}
+#| message: false
+#| warning: false
+#| echo: false
+
+# visualize all the cleaned network graphs  
+walk(ggraph_clean, print)
+
+# classify them 
+
+network_types <- c(
+  "Gatekeeper", "Peripheral", "Peripheral", "Union", "Integration", "Union", "Gatekeeper", "Gatekeeper", "Gatekeeper", "Peripheral", "Integration", "Union", "Peripheral", "Union", "Peripheral", "Union", "Integration", "Peripheral", "Peripheral", "Peripheral", "Bridge")
+
+igraph_named <- igraph_clean
+names(igraph_named) <- network_types
+
+```
+
+```{r network classification and visulaization I}
+
+# Custom graph plotting function
+graph_plot <- function(igraph, seed = 126, show_legend = FALSE) {
+  
+  set.seed(seed)
+
+lang_colors <- c(
+  "Bilingual" = "#66c2a5",   
+  "German" = "#8da0cb",      
+  "Russian" ="#fc8d62",     
+  "Other" = "#e78ac3",      
+  "Unknown" = "#a6d854"      
+)
+
+  ggraph(igraph, layout = 'fr') +
+    geom_edge_link(color = "grey80", alpha = 0.7, size = 1) +
+    geom_node_point(
+      aes(color = language),
+      show.legend = show_legend,
+      size = 7
+    ) +
+    scale_color_manual(
+      values = lang_colors,
+      name = "User's Online Language Practice",
+      drop = FALSE
+    ) +
+    theme_graph(background = 'white') +
+    theme(
+      text = element_text(family = "Times", face = "plain", size = 16),
+      legend.direction = "horizontal",
+      legend.key.size = unit(0.5, 'cm'),
+      legend.title = element_text(size = 18),
+      legend.text = element_text(size = 18),
+      plot.margin = margin(5, 5, 5, 5)
+    )  
+}
+
+# Make plots (no density inside the plots)
+gatekeeper <- graph_plot(igraph_clean[[9]], seed = 132) +  
+  annotate("text", x = -Inf, y = Inf, label = "1. Gatekeeper",
+           hjust = -0.1, vjust = 2, size = 6.5, family = "Times", face = "plain")
+
+bridge <- graph_plot(igraph_clean[[21]], seed = 138) +  
+  annotate("text", x = -Inf, y = Inf, label = "2. Language Bridge",
+           hjust = -0.1, vjust = 2, size = 6.5, family = "Times", face = "plain")
+
+peripheral <- graph_plot(igraph_clean[[2]], seed = 289) +  
+  annotate("text", x = -Inf, y = Inf, label = "3. Peripheral Language",
+           hjust = -0.1, vjust = 2, size = 6.5, family = "Times", face = "plain")
+
+union <- graph_plot(igraph_clean[[14]], , seed = 132) +  
+  annotate("text", x = -Inf, y = Inf, label = "4. Union",
+           hjust = -0.1, vjust = 2, size = 6.5, family = "Times", face = "plain")
+
+integration <- graph_plot(igraph_clean[[5]], seed = 120, show_legend = TRUE) +  
+  annotate("text", x = -Inf, y = Inf, label = "5. Integration",
+           hjust = -0.1, vjust = 2, size = 6.5, family = "Times", face = "plain")
+
+
+
+# Collect densities
+densities <- glue(
+  "Gatekeeper: {round(cross_border_density(igraph_clean[[9]], Bilinguals.include = FALSE), 3)}   | ",
+  "Language Bridge: {round(cross_border_density(igraph_clean[[21]], Bilinguals.include = FALSE), 3)}   | ",
+  "Peripheral Language: {round(cross_border_density(igraph_clean[[2]], Bilinguals.include = FALSE), 3)}   | ",
+  "Union: {round(cross_border_density(igraph_clean[[14]], Bilinguals.include = FALSE), 3)}   | ",
+  "Integration: {round(cross_border_density(igraph_clean[[5]], Bilinguals.include = FALSE), 3)}"
+)
+
+# Combine plots
+final_plot <- (gatekeeper + bridge + peripheral) / (union + integration) +
+  plot_layout(guides = "collect") &
+  theme(legend.position = "bottom")
+
+# Add density text above the legend
+final_plot <- final_plot + 
+  plot_annotation(
+    caption = densities,
+    theme = theme(
+      plot.caption = element_text(
+        family = "Times", face = "italic", size = 16, hjust = 0.5,
+        margin = margin(b = 10, t = 10)
+      )
+    )
+  )
+
+# Display
+final_plot
+
+```
+
+```{r network classification and visulaization II}
+
+graph_plot_appendix <- function(igraph, net_type, seed = 126, show_legend = TRUE, annotate_density_below = FALSE) {
+  
+  cross_border_denisty <- round(cross_border_density(igraph, Bilinguals.include = FALSE), 3)
+
+  windowsFonts(Times = windowsFont("Times New Roman"))
+  set.seed(seed)
+
+lang_colors <- c(
+  "Bilingual" = "#66c2a5",   
+  "German" = "#8da0cb",      
+  "Russian" ="#fc8d62",     
+  "Other" = "#e78ac3",      
+  "Unknown" = "#a6d854"     
+)
+
+  ggraph_plot <- ggraph(igraph, layout = 'fr') +
+    geom_edge_link(color = "grey80", alpha = 0.9, size = 10) +
+    geom_node_point(
+      aes(color = language),
+      show.legend = show_legend,
+      size = 5.3
+    ) +
+    scale_color_manual(
+      values = lang_colors,
+      name = "User's Online Language Practice",
+      drop = FALSE
+    ) +
+    theme_graph(background = 'white') +
+    theme(
+      text = element_text(family = "Times", face = "plain", size = 12),
+      legend.position = "bottom",  
+      legend.direction = "horizontal",
+      legend.key.size = unit(0.5, 'cm'),
+      legend.key.height = unit(0.5, 'cm'),
+      legend.key.width = unit(0.5, 'cm'),
+      legend.title = element_text(size = 14),
+      legend.text = element_text(size = 12)
+    ) +
+    annotate(
+      "text",
+      x = -Inf, y = Inf,
+      label = net_type,
+      hjust = -0.1, vjust = 2,
+      size = 6,
+      family = "Times",
+      face = "bold"
+    )
+  
+  # Add density annotation below, if requested
+  if (annotate_density_below) {
+    ggraph_plot <- ggraph_plot +
+      annotate(
+        "text",
+        x = 0, y = -Inf,
+        label = glue("Cross-border density: {cross_border_denisty}"),
+        vjust = -1,
+        size = 5.3,
+        family = "Times",
+        face = "italic"
+      )
+  } else {
+    ggraph_plot <- ggraph_plot +
+      annotate(
+        "text",
+        x = -Inf, y = Inf,
+        hjust = -1.2, vjust = 43.2,
+        size = 3.3,
+        color = "black",
+        label = glue("Cross-border density: {cross_border_denisty}"),
+        family = "Times",
+        face = "italic"
+      )
+  }
+
+  return(ggraph_plot)
+}
+
+
+plots_list_appendix <- purrr::map2(igraph_clean, network_types, ~ graph_plot_appendix(.x, .y, show_legend = FALSE, annotate_density_below = TRUE))
+
+
+plots_list_appendix[[18]]
+
+graph_plot_appendix(igraph_clean[[18]],network_types[18], show_legend = FALSE, seed = 200,  annotate_density_below = TRUE)
+```
+
+```{r network descriptives}
+#| message: false
+#| warning: false
+#| echo: false
+
+# Function for Network-Level Stats
+get_selected_network_stats <- function(g) {
+  
+  language_count <- table(V(g)$language)  
+  
+  russian_prop <- sum(language_count["Russian"], na.rm = TRUE) / length(V(g)) * 100
+  german_prop <- sum(language_count["German"], na.rm = TRUE) / length(V(g)) * 100
+  bilingual_prop <- sum(language_count["Bilingual"], na.rm = TRUE) / length(V(g)) * 100
+  other_prop <- sum(language_count["Other"], na.rm = TRUE) / length(V(g)) * 100
+  
+  degree_centrality <- igraph::degree(g, normalized = TRUE)
+  V(g)$degree <- degree_centrality
+  
+  stats <- tibble(
+    number_nodes = round(vcount(g), 1),
+    number_edges = round(ecount(g), 1),
+    density = round(igraph::edge_density(g), 3),
+    cross_border_density = round(cross_border_density(g), 3),
+    transitivity = round(igraph::transitivity(g), 3),
+    russian_percentage = round(russian_prop, 1),
+    german_percentage = round(german_prop, 1),
+    bilingual_percentage = round(bilingual_prop, 1),
+    other_percentage = round(other_prop, 1)
+  )
+  
+  return(stats)
+}
+
+# Labels
+network_stats_names <- c(
+  "number_nodes" = "Number of Nodes",
+  "number_edges" = "Number of Edges",
+  "density" = "Density",
+  "cross_border_density" = "Cross-Border Density",
+  "transitivity" = "Transitivity",
+  "russian_percentage" = "Russian Speakers (%)",
+  "german_percentage" = "German Speakers (%)",
+  "bilingual_percentage" = "Bilingual Speakers (%)",
+  "other_percentage" = "Other Language (%)"
+)
+
+# Network-Level DataFrame
+network_stats_df <- lapply(seq_along(igraph_clean), function(i) {
+  g <- igraph_clean[[i]]
+  type <- network_types[i]
+  stats <- get_selected_network_stats(g)
+  stats$network_type <- type
+  return(stats)
+}) |> bind_rows()
+
+#  Summary + Overall
+network_stats_summary <- network_stats_df |>
+  group_by(network_type) |>
+  summarise(across(where(is.numeric), list(
+    Mean = ~round(mean(.x, na.rm = TRUE), 2),
+    SD = ~round(sd(.x, na.rm = TRUE), 2)
+  ))) |>
+  ungroup()
+
+# Add Overall stats
+overall_stats <- network_stats_df |>
+  summarise(across(where(is.numeric), list(
+    Mean = ~round(mean(.x, na.rm = TRUE), 2),
+    SD = ~round(sd(.x, na.rm = TRUE), 2)
+  ))) |>
+  mutate(network_type = "Overall") |>
+  relocate(network_type)
+
+network_stats_summary_extended <- bind_rows(network_stats_summary, overall_stats)
+
+# Pivot Long and Join
+means_long <- network_stats_summary_extended |>
+  select(network_type, ends_with("_Mean")) |>
+  pivot_longer(
+    cols = -network_type,
+    names_to = "statistic",
+    names_pattern = "(.*)_Mean",
+    values_to = "Mean"
+  )
+
+sds_long <- network_stats_summary_extended |>
+  select(network_type, ends_with("_SD")) |>
+  pivot_longer(
+    cols = -network_type,
+    names_to = "statistic",
+    names_pattern = "(.*)_SD",
+    values_to = "SD"
+  )
+
+long_combined <- left_join(means_long, sds_long, by = c("network_type", "statistic")) |>
+  mutate(
+    mean_sd = case_when(
+      statistic %in% c("number_nodes", "number_edges") & !is.na(SD) ~ sprintf("%.0f (%.0f)", Mean, SD),
+      statistic %in% c("number_nodes", "number_edges") & is.na(SD) ~ sprintf("%.0f", Mean),
+      statistic %in% c("russian_percentage", "german_percentage", "bilingual_percentage", "other_percentage") & !is.na(SD) ~ sprintf("%.1f (%.1f)", Mean, SD),
+      statistic %in% c("russian_percentage", "german_percentage", "bilingual_percentage", "other_percentage") & is.na(SD) ~ sprintf("%.1f", Mean),
+      is.na(SD) ~ sprintf("%.2f", Mean),
+      TRUE ~ sprintf("%.2f (%.2f)", Mean, SD)
+    )
+  )
+
+# Final Wide Table
+stats_table <- long_combined |>
+  select(statistic, network_type, mean_sd) |>
+  pivot_wider(names_from = network_type, values_from = mean_sd)
+
+stats_table$Statistic <- network_stats_names[stats_table$statistic]
+
+desired_order <- c("Gatekeeper", "Bridge", "Peripheral", "Union", "Integration", "Overall")
+
+stats_table <- stats_table |>
+  select(`Mean Statistic` = Statistic, all_of(desired_order), -statistic)
+
+# Render with GT
+stats_table |>
+  gt::gt() |>
+  opt_table_font(
+    font = list(
+      google_font(name = "Times New Roman"), 
+      default_fonts()
+    )
+  ) |>
+  tab_source_note(
+    source_note = md("Mean value across Network Types (Standard Deviation).")
+  ) |>
+  tab_source_note(
+    source_note = md("*Source: Author's calculations using self-collected VK Network Data.*")
+  ) |>
+  tab_row_group(
+    label = md("**Network-Level Statistics**"),
+    rows = 1:5
+  ) |>
+  tab_row_group(
+    label = md("**Attribute-level Descriptives**"),
+    rows = 6:9
+  ) |>
+  tab_spanner(
+    label = "Structural Hole Spanning Types",
+    columns = c("Gatekeeper", "Bridge")
+  ) |>
+  tab_spanner(
+    label = "Integrated Network Types",
+    columns = c("Peripheral", "Union", "Integration")
+  ) |>
+  cols_label(
+    Gatekeeper = "Gatekeeper (4)",
+    Bridge = "Lang. Bridge (1)",
+    Peripheral = "Periph. Lang. (8)",
+    Union = "Union (5)",
+    Integration = "Integration (3)",
+    Overall = "Overall (21)"
+  ) |>
+  tab_footnote(
+    footnote = "No unknown language category among the 21 multilingual networks.",
+    locations = cells_row_groups(groups = md("**Attribute-level Descriptives**"))
+  ) |>
+  tab_footnote(
+    footnote = "Network type (number of networks of this type)",
+    locations = cells_column_labels(columns = Gatekeeper)
+  )
+
+```
+
+# Study 2: Exponential Random Graph Analysis
+
+```{r ERGM}
+#| message: false
+#| warning: false
+#| echo: false
+
+# get network object 
+net <- lapply(igraph_clean, asNetwork)
+
+# modeling strategy 
+
+# 1.	A full model, which includes all terms (sociality, language-based selective mixing, degree assortativity, popularity, and triadic closure).
+# 2.	A non-closure model (NC), which excludes triadic closure from the full model; and
+# 3.	A language mixing model (LM), which includes only language-based selective mixing.
+
+
+
+
+```
+
+```{r full model}
+#| message: false
+#| warning: false
+#| echo: false
+
+# Full model
+
+full_model_results <- vector("list", length(net))
+
+for (i in seq_along(net)) {
+  message("Running model ", i, " of ", length(net))
+  
+  result <- tryCatch(
+    ergm(
+      net[[i]] ~ edges + 
+        nodemix("language") +  
+        absdiff("degree") + 
+        nodecov("degree") +  
+        gwesp(1.3, fixed = TRUE),
+      control = control.ergm(seed = 120)
+    ),
+    error = function(e) {
+      message("Error in model ", i, ": ", conditionMessage(e))
+      return(NA)
+    }
+  )
+  
+  full_model_results[[i]] <- result
+  saveRDS(full_model_results, file = "full_model_results.rds")
+}
+
+
+# load data
+#full_model_results <- readRDS("full_model_results.rds")
+
+
+
+# give them a unique index based on their network number 
+for (i in seq_along(full_model_results)) {
+  names(full_model_results)[[i]] <- paste0("network ", i)
+  
+}
+
+
+
+```
+
+```{r non closure model}
+#| message: false
+#| warning: false
+#| echo: false
+
+
+non_closure_model_results <- vector("list", length(net))
+
+for (i in seq_along(net)) {
+  message("Running model ", i, " of ", length(net))
+  result <- tryCatch(
+    ergm(net[[i]] ~ edges + nodemix("language") + absdiff("degree") + nodecov("degree"),           
+         control = control.ergm(seed = 120)),
+    error = function(e) {
+      message("Error in model ", i, ": ", conditionMessage(e))
+      return(NA)
+    }
+  )
+  
+  non_closure_model_results[[i]] <- result
+  saveRDS(non_closure_model_results, file = "non_closure_model_results.rds")
+}
+
+
+# load data
+# non_closure_model_results <- readRDS("non_closure_model_results")
+
+
+# give them a unique index based on their network number 
+for (i in seq_along(non_closure_model_results)) {
+  names(non_closure_model_results)[[i]] <- paste0("network ", i)
+  
+}
+
+
+```
+
+```{r language mixing model}
+#| message: false
+#| warning: false
+#| echo: false
+
+
+language_mixing_model_results <- vector("list", length(net))
+
+for (i in seq_along(net)) {
+  message("Running model ", i, " of ", length(net))
+  result <- tryCatch(
+    ergm(net[[i]] ~ edges + nodemix("language"),           
+         control = control.ergm(seed = 120)),
+    error = function(e) {
+      message("Error in model ", i, ": ", conditionMessage(e))
+      return(NA)
+    }
+  )
+  
+  language_mixing_model_results[[i]] <- result
+  saveRDS(language_mixing_model_results, file = "language_mixing_model_results.rds")
+}
+
+
+# load data
+# language_mixing_model_results <- readRDS("language_mixing_model_results.rds")
+
+
+# give them a unique index based on their network number 
+for (i in seq_along(language_mixing_model_results)) {
+  names(language_mixing_model_results)[[i]] <- paste0("network ", i)
+  
+}
+
+
+```
+
+```{r AIC and likelihood-ratio tests}
+#| message: false
+#| warning: false
+#| echo: false
+
+library(lmtest)
+
+
+# Create a list of model lists and their names
+model_lists <- list(
+  full_model = full_model_results,
+  non_closure_model = non_closure_model_results,
+  language_mixing_model = language_mixing_model_results
+)
+
+
+## Find models with smallest log likelihood value
+# Initialize empty tibble
+logLik_df <- tibble()
+
+# Loop through each model list
+for (model_name in names(model_lists)) {
+  models <- model_lists[[model_name]]
+  
+  for (i in seq_along(models)) {
+    model <- models[[i]]
+    
+    # Extract logLik
+    logLik_value <- logLik(model)
+    
+    # Append to tibble
+ logLik_df <- bind_rows(
+      logLik_df,
+      tibble(
+        logLik = as.numeric(logLik_value),
+        model_name = model_name,
+        network_index = i
+      )
+    )
+  }
+}
+
+# Find model with minimum AIC per network
+max_logLik_df <- logLik_df |> 
+  group_by(network_index) |> 
+  filter(logLik == max(logLik, na.rm = TRUE)) |> 
+  arrange(network_index)
+
+
+# Calculate logLik difference between full_model and non_closure_model
+logLik_diff_df <- logLik_df |> 
+  filter(model_name %in% c("full_model", "non_closure_model")) |> 
+  select(network_index, model_name, logLik) |> 
+  pivot_wider(names_from = model_name, values_from = logLik) |> 
+  mutate(diff_logLik = full_model - non_closure_model)
+
+
+
+## Find models with smallest AIC value
+# Initialize empty tibble
+AIC_df <- tibble()
+
+# Create a list of model lists and their names
+model_lists <- list(
+  full_model = full_model_results,
+  non_closure_model = non_closure_model_results,
+  language_mixing_model = language_mixing_model_results
+)
+
+# Loop through each model list
+for (model_name in names(model_lists)) {
+  models <- model_lists[[model_name]]
+  
+  for (i in seq_along(models)) {
+    model <- models[[i]]
+    
+    # Extract AIC
+    aic_value <- glance(model)$AIC
+    
+    # Append to tibble
+    AIC_df <- bind_rows(
+      AIC_df,
+      tibble(
+        AIC_value = aic_value,
+        model_name = model_name,
+        network_index = i
+      )
+    )
+  }
+}
+
+# Find model with minimum AIC per network
+min_AIC <- AIC_df |> 
+  group_by(network_index) |> 
+  filter(AIC_value == min(AIC_value, na.rm = TRUE)) |> 
+  arrange(network_index)
+
+```
+
+```{r coef summary boxplot}
+#| message: false
+#| warning: false
+#| echo: false
+
+# Create data summary 
+
+full_model_summary <- full_model_results  |>
+  imap(~ tidy(.x) 
+       |> mutate(model = .y)) |>  # adds model index
+  bind_rows() |>
+  filter(estimate != -Inf, 
+        #  p.value < 0.05    also non-significant findings
+         ) |>
+  mutate(
+    coef = case_match(term,
+                      "edges" ~ "Intercept",
+                      "mix.language.Bilingual.German" ~ "Bilingual:German",
+                      "mix.language.German.German" ~ "German:German",
+                      "mix.language.Bilingual.Russian" ~ "Bilingual:Russian",
+                      "mix.language.German.Russian" ~ "German:Russian",
+                      "mix.language.Other.Russian" ~ "Other:Russian",
+                      "mix.language.Russian.Russian" ~ "Russian:Russian",
+                      "mix.language.Bilingual.Other" ~ "Bilingual:Other",
+                      "mix.language.German.Other" ~ "German:Other",
+                      "mix.language.Other.Other" ~ "Other:Other",
+                      "nodecov.degree" ~ "Popularity",
+                      "absdiff.degree" ~ "Degree Assortativity",
+                      "gwesp.fixed.1.3" ~ "Triadic Closure"
+                      ),
+    group = str_extract(term, "mix|nodecov|absdiff|gwesp"),
+    group = case_match(group,
+                       "mix" ~ "Lang.-based Selective Mixing",
+                       "nodecov" ~ "Degree-based Selective Mixing",
+                       "absdiff" ~ "Degree-based Selective Mixing", 
+                       "gwesp" ~ "Network Self-Organisation"
+                       ),
+    exp_estimate = exp(estimate),
+    mid =  exp_estimate,
+    low = exp(estimate - 1.96 * std.error),
+    high = exp(estimate + 1.96 * std.error), 
+    network_type_cat = if_else(model %in% c("network 1", "network 7", "network 8", "network 9", "network 21"), "Structural Hole Spanners", "Integrated Networks")
+  )
+
+# Create boxplot
+
+full_model_summary |> 
+  filter(coef != "Intercept") |> 
+  mutate(coef = fct_reorder(coef, estimate)) |> 
+  ggplot(aes(y = coef, x = estimate, fill = network_type_cat)) + 
+  geom_vline(xintercept = 0, color = "#e78ac3", linetype = "dashed") +
+  geom_boxplot(alpha = 0.5, position = position_dodge(width = 0.7)) +  
+  facet_wrap(
+    vars(group),
+    nrow = 4,
+    scales = "free_y",
+    strip.position = "left",
+    dir = "v"
+  ) +
+  scale_fill_manual(
+    values = c(
+      "Structural Hole Spanners" = "#fc8d62",  # orange
+      "Integrated Networks" = "#8da0cb"        # blue
+    )
+  ) +
+  coord_cartesian(xlim = c(-6, 10)) +
+  theme_minimal(base_family = "Times New Roman") +
+  theme(
+    strip.placement = "outside",
+    legend.position = "bottom",
+    legend.direction = "horizontal",
+    legend.text = element_text(size = 14, family = "Times New Roman"),
+    legend.title = element_text(size = 16, family = "Times New Roman"),
+    axis.text.y = element_text(size = 12, family = "Times New Roman"),
+    axis.text.x = element_text(size = 12, family = "Times New Roman"),
+    axis.title = element_text(size = 14, family = "Times New Roman"),
+    plot.caption = element_text(size = 12, family = "Times New Roman"),
+    strip.text = element_text(size = 12, family = "Times New Roman")
+  ) +
+  labs(
+    y = "",
+    x = "Conditional (log-)odds ratios",
+    fill = "Network Type",  
+    caption = "Full Model coefficients plotted across all 21 multilingual networks divided by network categories. Reference Category is German:German. \n Source: Author's calculations applying ERGMs to VK network data."
+  )
+
+```
+
+```{r coefficients summary table}
+#| message: false
+#| warning: false
+#| echo: false
+
+# create overall summary 
+
+
+coef_summary_overall <- full_model_summary |> 
+  filter(!coef %in% c("Intercept")) |> 
+  group_by(coef) |>  
+  summarise(
+    n_coef = n(),
+    n_significant = sum(p.value < 0.05, na.rm = TRUE), 
+    percentage_significant = (n_significant / n_coef) * 100,
+    median = round(median(estimate, na.rm = TRUE), 1),
+    iqr = round(IQR(estimate, na.rm = TRUE), 1),
+    .groups = "drop"
+  ) |> 
+  mutate(
+    Variable = fct_relevel(coef, c("Popularity", "Degree Assortativity", "Triadic Closure")),
+    Coefficients = n_coef,
+    `Signif. Coeff.` = n_significant,
+    Percentage = round(percentage_significant, 0),
+    Median = median,
+    IQR = iqr
+  ) |> 
+  arrange(Variable) |> 
+  select(Variable, Coefficients, `Signif. Coeff.`, Percentage, Median, IQR)
+
+# Prepare network/tzpe specific summary
+
+coef_summary_by_type <- full_model_summary |> 
+  filter(!coef %in% c("Intercept")) |> 
+  filter(network_type_cat %in% c("Integrated Networks", "Structural Hole Spanners")) |> 
+  group_by(coef, network_type_cat) |>  
+  summarise(
+    n_coef = n(),
+    n_significant = sum(p.value < 0.05, na.rm = TRUE),
+    percentage_significant = (n_significant / n_coef) * 100,
+    median = round(median(estimate, na.rm = TRUE), 1),
+    iqr = round(IQR(estimate, na.rm = TRUE), 1),
+    .groups = "drop"
+  ) |> 
+  mutate(
+    Variable = coef,
+    NetworkType = network_type_cat,
+    Coefficients = n_coef,
+    `Signif. Coeff.` = n_significant,
+    Percentage = round(percentage_significant, 0),
+    Median = median,
+    IQR = iqr,
+    Variable = fct_relevel(Variable, c("Popularity", "Degree Assortativity", "Triadic Closure")),
+    NetworkType = factor(NetworkType, levels = c("Integrated Networks", "Structural Hole Spanners"))
+  ) |> 
+  arrange(NetworkType, Variable) |> 
+  select(NetworkType, Variable, Coefficients, `Signif. Coeff.`, Percentage, Median, IQR)
+
+# build GT tables
+
+# Overall table 
+gt_overall <- coef_summary_overall |> 
+  gt::gt() |> 
+  tab_header(title = md("**Overall Network Summary**")) |> 
+  tab_source_note(md("*Source: Author's calculations based on VK Network data.*")) |> 
+  tab_footnote(
+    footnote = "Total number of coefficients estimated for this variable.",
+    locations = cells_column_labels(columns = Coefficients)
+  ) |> 
+  tab_footnote(
+    footnote = "Number of significant (p < 0.05) coefficients estimated for this variable.",
+    locations = cells_column_labels(columns = `Signif. Coeff.`)
+  ) |> 
+  tab_footnote(
+    footnote = "Percentage of significant coefficients estimated for this variable.",
+    locations = cells_column_labels(columns = Percentage)
+  ) |> 
+  tab_footnote(
+    footnote = "Median coefficient value for all coefficients across the 21 networks.",
+    locations = cells_column_labels(columns = Median)
+  ) |> 
+  tab_footnote(
+    footnote = "Interquartile Range (Q3 - Q1).",
+    locations = cells_column_labels(columns = IQR)
+  ) |> 
+  cols_align(align = "left", columns = "Variable")
+
+#  Network type–specific table 
+gt_by_type <- coef_summary_by_type |> 
+  mutate(row_id = row_number()) |> 
+  select(-c(NetworkType, row_id)) |> 
+  gt::gt() |> 
+  tab_header(title = md("**Network-Type-Specific Summary**")) |>
+  tab_row_group(
+    label = md("*Integrated Network Types*"),
+    rows = which(coef_summary_by_type$NetworkType == "Integrated Networks")
+  ) |> 
+  tab_row_group(
+    label = md("*Structural Hole Types*"),
+    rows = which(coef_summary_by_type$NetworkType == "Structural Hole Spanners")
+  ) |> 
+  cols_align(align = "left", columns = "Variable")
+```
+
+```{r modelsummary table}
+#| message: false
+#| warning: false
+#| echo: false
+#| include: false
+#| output: false
+
+library(modelsummary)
+
+
+# A function for producing modelsummary_list with a set of additions
+mslist <- function(models) {
+
+  lrtests <- with(models, do.call(lmtest::lrtest, lapply(names(models), as.name)))
+  mslist <- modelsummary(models, output = "modelsummary_list", statistic = 'conf.int') |> 
+    map( \(x) {
+    x$tidy <- x$tidy |> 
+      mutate(
+      estimate  = if_else(is.infinite(estimate), NA_real_, estimate),
+      std.error  = if_else(std.error == 0, NA_real_, std.error),
+      p.value  = if_else(p.value == 0, NA_real_, p.value)
+      )
+    x
+  }
+)
+  
+  i <- 1
+  for (m in names(models)) {
+    mslist[[m]]$glance$df <- lrtests[["Df"]][i]
+    mslist[[m]]$glance$logLik <- lrtests[["LogLik"]][i]
+    mslist[[m]]$glance$chisq <- lrtests[["Chisq"]][i]
+    mslist[[m]]$glance$p.value <- lrtests[["Pr(>Chisq)"]][i]
+    mslist[[m]]$glance$AIC <- AIC(models[[m]])
+    mslist[[m]]$glance$BIC <- BIC(models[[m]])
+    i <- i + 1
+  }
+  
+  return(mslist)
+}
+
+
+# function to produce a summary table for all 21 multilingual networks
+
+produce_ergm_summary_table <- function(i, 
+                                 language_mixing_model_results,
+                                 non_closure_model_results,
+                                 full_model_results) {
+  
+  # Construct models list for this iteration
+  models_ergm <- list(
+    "LM Model" = language_mixing_model_results[[i]],
+    "NC Model" = non_closure_model_results[[i]],
+    "Full Model" = full_model_results[[i]]
+  )
+  
+  # Generate model summary list
+  modlist_ergm <- mslist(models_ergm)
+  
+  # Calculate % change between NC and Full
+  coefs_NC <- tidy(modlist_ergm[[2]])
+  coefs_Full <- tidy(modlist_ergm[[3]])
+  
+  coef_compare <- coefs_NC |>
+    select(term, estimate_NC = estimate) |>
+    left_join(coefs_Full %>% select(term, estimate_Full = estimate), by = "term") |>
+    mutate(
+      perc_change = 100 * (estimate_Full - estimate_NC) / estimate_NC
+    ) |>
+    filter(!is.na(perc_change)) |>
+    slice(rep(1:n(), each = 2)) |>
+    mutate(
+      term = replace(term, seq(2, n(), by = 2), NA),
+      estimate_NC = replace(estimate_NC, seq(2, n(), by = 2), NA),
+      estimate_Full = replace(estimate_Full, seq(2, n(), by = 2), NA),
+      perc_change = replace(perc_change, seq(2, n(), by = 2), NA)
+    ) |>
+    mutate(
+      across(everything(), ~ if_else(term == "edges", NA, .))
+    )
+  
+  # Custom GOF map
+  gof_map <- modelsummary::gof_map |>
+    mutate(omit = FALSE) |>
+    bind_rows(tibble(
+      raw = "pct.correct",
+      clean = "Pct Correctly Predicted",
+      fmt = 1, omit = FALSE
+    )) |>
+  slice(match(c("nobs","logLik","chisq","df","p.value"), raw)) |> 
+  mutate(fmt=ifelse(raw %in% c("logLik","chisq"),1,fmt))
+  
+  # Produce modelsummary table
+  modelsummary(
+    modlist_ergm,
+    coef_rename = c(
+      "edges" = "Intercept",
+      "mix.language.Bilingual.German" = "Bilingual:German (Ref: Bilingual:Bilingual)",
+      "mix.language.German.German" = "German:German (Ref: Bilingual:Bilingual)",
+      "mix.language.Bilingual.Russian" = "Bilingual:Russian (Ref: Bilingual:Bilingual)",
+      "mix.language.German.Russian" = "German:Russian (Ref: Bilingual:Bilingual)",
+      "mix.language.Other.Russian" = "Other:Russian (Ref: Bilingual:Bilingual)",
+      "mix.language.Russian.Russian" = "Russian:Russian (Ref: Bilingual:Bilingual)",
+      "mix.language.Bilingual.Other" = "Bilingual:Other (Ref: Bilingual:Bilingual)",
+      "mix.language.German.Other" = "German:Other (Ref: Bilingual:Bilingual)",
+      "mix.language.Other.Other" = "Other:Other (Ref: Bilingual:Bilingual)",
+      "nodecov.degree" = "Popularity",
+      "absdiff.degree" = "Degree Assortativity",
+      "gwesp.fixed.1.3" = "Triadic Closure"
+    ),
+    stars = TRUE,
+    add_columns = tibble("% Change*" = coef_compare$perc_change),
+    gof_map = gof_map,
+    notes = "Estimates in conditional (log-)odds ratios. Standard Error in brackets. *Percentage change from NC to Full Model. Coefficients for “NA” category are not shown. Likelihood ratio tests are performed comparing each model to the model in the previous column, (i.e., LM to NC, and NC to Full). Source: Author's ERGM application to VK network data.",
+    fmt = 2,
+    title = glue::glue("Multilingual Network Number {i}")
+  )
+}
+
+#loop thorugh the three lists with nested ERGms to produce summary tables
+ergm_tables <- vector("list", length(full_model_results))
+
+for (i in seq_along(full_model_results)) {
+  ergm_tables[[i]] <- produce_ergm_summary_table(
+    i,
+    language_mixing_model_results,
+    non_closure_model_results,
+    full_model_results
+  )
+}
+
+
+# print all into the console
+ergm_tables |> 
+  map(print)
+
+# print ergm table for network 14
+ergm_tables[[5]]
+
+  
+```
+
+```{r percentage change across networks and network types}
+#| message: false
+#| warning: false
+#| echo: false
+
+calc_overall_mean_perc_change_sig <- function(language_mixing_list, non_closure_list, full_list, network_types) {
+  
+  all_changes <- tibble()
+
+  for (i in seq_along(full_list)) {
+    models_ergm <- list(
+      "LM Model" = language_mixing_list[[i]],
+      "NC Model" = non_closure_list[[i]],
+      "Full Model" = full_list[[i]]
+    )
+    
+    coefs_NC <- tidy(models_ergm[["NC Model"]])
+    coefs_Full <- tidy(models_ergm[["Full Model"]])
+    
+   # Uncomment to skip networks with insignificant triadic closure term
+    if(coefs_Full |> filter(term == "gwesp.fixed.1.3") |> pull(p.value) >= 0.05) next
+    
+    coef_changes <- coefs_NC |>
+      select(term, estimate_NC = estimate, p.value_NC = p.value) |>
+      left_join(
+        coefs_Full |> select(term, estimate_Full = estimate, p.value_Full = p.value),
+        by = "term"
+      ) |>
+      mutate(
+        perc_change = 100 * (estimate_Full - estimate_NC) / estimate_NC,
+        network_type = network_types[i],
+        network_id = i
+      ) |>
+      filter(
+        !is.na(perc_change),
+        term != "edges", 
+        p.value_NC < 0.05
+        # p.value_Full < 0.05 # optional if you want both sig
+      )
+    
+    all_changes <- bind_rows(all_changes, coef_changes)
+  }
+  
+  # Classify as structural hole or other
+  all_changes <- all_changes |> 
+    mutate(
+      type_group = case_when(
+        network_type %in% c("Gatekeeper", "Bridge") ~ "Structural Hole",
+        TRUE ~ "Other"
+      )
+    )
+  
+  # Overall mean % change (all coefficients across networks)
+  overall_mean <- all_changes |> 
+    summarise(overall_mean_perc_change = mean(perc_change, na.rm = TRUE)) |> 
+    pull()
+  
+  # Mean % change by type group (Structural Hole vs Other)
+  by_group_mean <- all_changes |> 
+    group_by(type_group) |> 
+    summarise(mean_perc_change = mean(perc_change, na.rm = TRUE), .groups = "drop")
+  
+  # Mean % change per coefficient (term) across all networks
+  mean_change_per_term <- all_changes |> 
+    group_by(term) |> 
+    summarise(mean_perc_change = mean(perc_change, na.rm = TRUE), .groups = "drop") |> 
+    arrange(desc(abs(mean_perc_change)))
+  
+  list(
+    overall_mean = overall_mean,
+    by_group_mean = by_group_mean,
+    mean_change_per_term = mean_change_per_term,
+    all_changes = all_changes
+  )
+}
+
+
+  
+network_types <- c(
+  "Gatekeeper", "Peripheral", "Integration", "Integration", "Union", 
+  "Integration", "Gatekeeper", "Gatekeeper", "Gatekeeper", "Peripheral", 
+  "Integration", "Integration", "Peripheral", "Union", "Integration", 
+  "Union", "Integration", "Peripheral", "Peripheral", "Peripheral", 
+  "Bridge"
+)
+
+results_diff <- calc_overall_mean_perc_change_sig(
+  language_mixing_model_results,
+  non_closure_model_results,
+  full_model_results,
+  network_types = network_types
+)
+
+
+
+```
+
+```{r log odds of GWESP change statistics}
+
+#pull gwesp estimate for model 14
+
+gwesp_estimate <- full_model_results[[14]] |> 
+  tidy() |> 
+  filter(term == "gwesp.fixed.1.3") |> 
+  pull(estimate)
+
+
+# for one closed triangle
+3* gwesp_estimate
+
+# for two closed triangle
+
+4 + (exp(1.3) * ((1-(1-exp(-1.3))^2)))* gwesp_estimate
+
+
+
+#to do: reference category, decay parametewr, describe GWESp term, gof plot
+```
+
+```{r Mediation Analysis with AMEs}
+#| message: false
+#| warning: false
+#| echo: false
+
+
+#full table
+# collect mediation for AME coefficients
+ame_mediation_df <- tibble()
+
+for (i in seq_along(full_model_results)) {
+  
+  non_closure_model <- non_closure_model_results[[i]]
+  full_model <- full_model_results[[i]]  
+  
+  ergm_terms <- unique(tidy(full_model_results[[i]])$term)
+  
+  for (term in ergm_terms) {
+    
+    if (term != "gwesp.fixed.1.3")  {
+      
+      # mediation analysis
+      results <- ergm.mma(
+        non_closure_model,
+        full_model,
+        direct.effect = term,
+        mediator = "gwesp.fixed.1.3",
+        at.controls = NULL,
+        control_vals = NULL,
+        ME = "AME"
+      )
+      
+      # Append mediation row
+      ame_mediation_df <- bind_rows(
+        ame_mediation_df,
+        tibble(
+          term = term,
+          NC_Model_AME = as.numeric(results[1, "AME"]),
+          NC_AME_P = as.numeric(results[1, "P"]),
+          Full_AME = as.numeric(results[2, "AME"]),
+          Full_P = as.numeric(results[2, "P"]),
+          Mediated_effect = as.numeric(results[3, "AME"]),
+          Mediated_P = as.numeric(results[2, "P"]),
+          Proportion = as.numeric(sub(".*=\\s*", "", attr(results, "description"))),
+          model_name = paste0("model_", i),
+          network_index = i,
+          network_type = network_types[i]
+        )
+      )
+      
+    } else {
+      
+      # Calculate AME for gwesp term only
+      ame_gwesp <- ergm.AME(
+        model = full_model,
+        var1 = "gwesp.fixed.1.3",
+        return.dydx = FALSE
+      )
+      
+      # Append row for gwesp with AME in Full_AME and NA elsewhere
+      ame_mediation_df <- bind_rows(
+        ame_mediation_df,
+        tibble(
+          term = term,
+          NC_Model_AME = NA_real_,
+          NC_AME_P = as.numeric(ame_gwesp[1, "P"]),
+          Full_AME = as.numeric(ame_gwesp[1, "AME"]),
+          Full_P = as.numeric(ame_gwesp[1, "P"]),
+          Mediated_effect = NA_real_,
+          Mediated_P = as.numeric(ame_gwesp[1, "P"]), 
+          Proportion = NA_real_,
+          model_name = paste0("model_", i),
+          network_index = i,
+          network_type = network_types[i]
+        )
+      )
+    }
+  }
+  
+  message("Finished model ", i, " (", network_types[i], ")")
+}
+
+
+
+
+
+
+
+ame_mediation_df_cleaned <- ame_mediation_df |> 
+  filter(!is.na(Mediated_P) & !is.nan(Mediated_P)) |> 
+  mutate(
+    coef = case_match(term,
+                      "edges" ~ "Intercept",
+                      "mix.language.Bilingual.German" ~ "Bilingual:German",
+                      "mix.language.German.German" ~ "German:German",
+                      "mix.language.Bilingual.Russian" ~ "Bilingual:Russian",
+                      "mix.language.German.Russian" ~ "German:Russian",
+                      "mix.language.Other.Russian" ~ "Other:Russian",
+                      "mix.language.Russian.Russian" ~ "Russian:Russian",
+                      "mix.language.Bilingual.Other" ~ "Bilingual:Other",
+                      "mix.language.German.Other" ~ "German:Other",
+                      "mix.language.Other.Other" ~ "Other:Other",
+                      "nodecov.degree" ~ "Popularity",
+                      "absdiff.degree" ~ "Degree Assortativity",
+                     "gwesp.fixed.1.3" ~ "Triadic Closure",
+                      .default = term
+                      ),
+    group = str_extract(term, "mix|nodecov|absdiff|gwesp"),
+    group = case_match(group,
+                       "mix" ~ "Lang.-based Selective Mixing",
+                       "nodecov" ~ "Degree-based Selective Mixing",
+                       "absdiff" ~ "Degree-based Selective Mixing", 
+                       "gwesp" ~ "Network Self-Organisation",
+                       .default = "Other"
+                       ),
+    network_type_cat = if_else(network_type %in% c("Gatekeeper", "Bridge"), "Structural Hole Spanners", "Integrated Networks")
+  )  
+
+
+# mediation df per type
+ mediation_df_summary <- ame_mediation_df_cleaned |> 
+  filter(coef != "Intercept") |> 
+  add_count(coef, network_type_cat) |>  
+  mutate(n_coef = n) |> 
+  group_by(coef, network_type_cat) |>  
+summarise(
+  n_coef = first(n_coef),  
+  n_significant = sum(Mediated_P < 0.05, na.rm = TRUE), 
+  percentage_significant = round((n_significant / n_coef) * 100,0),
+  median_AME_NC = round(median(NC_Model_AME, na.rm = TRUE)* 10, 4),
+  IQR_AME_NC = IQR(NC_Model_AME, na.rm = TRUE), 
+  median_AME_Full = round(median(Full_AME, na.rm = TRUE)* 10, 4),
+  IQR_Full = IQR(Full_AME, na.rm = TRUE), 
+  median_indirect = round(median(Mediated_effect, na.rm = TRUE)* 10, 4),
+  IQR_indirect = IQR(Mediated_effect, na.rm = TRUE),
+  median_proportion = round(median(Proportion, na.rm = TRUE), 4),
+  IQR_proportion = IQR(Proportion, na.rm = TRUE),
+  .groups = "drop"
+) |> 
+  ungroup() |> 
+  as_tibble()
+
+# Summary for overall
+mediation_df_overall <- ame_mediation_df_cleaned |> 
+  filter(coef != "Intercept") |> 
+  add_count(coef) |>  
+  mutate(n_coef = n) |> 
+  group_by(coef) |>  
+  summarise(
+    network_type_cat = "Overall",
+    n_coef = first(n_coef),  
+    n_significant = sum(Mediated_P < 0.05, na.rm = TRUE), 
+    percentage_significant = round((n_significant / n_coef) * 100, 0),
+    median_AME_NC = round(median(NC_Model_AME, na.rm = TRUE) * 10, 4),
+    IQR_AME_NC = IQR(NC_Model_AME, na.rm = TRUE), 
+    median_AME_Full = round(median(Full_AME, na.rm = TRUE) * 10, 4),
+    IQR_Full = IQR(Full_AME, na.rm = TRUE), 
+    median_indirect = round(median(Mediated_effect, na.rm = TRUE) * 10, 4),
+    IQR_indirect = IQR(Mediated_effect, na.rm = TRUE),
+    median_proportion = round(median(Proportion, na.rm = TRUE), 4),
+    IQR_proportion = IQR(Proportion, na.rm = TRUE),
+    .groups = "drop"
+  ) |> 
+  as_tibble()
+
+# Combine all summaries
+mediation_df_summary_combined <- bind_rows(mediation_df_overall, mediation_df_summary)
+
+# Construct overall GT Table
+gtTable_overall <- mediation_df_overall |>  
+  mutate(
+    Variable = coef,
+    Median_AME_NC = ifelse(
+      is.na(median_AME_NC), 
+      "", 
+      paste0(
+        round(median_AME_NC, 3), 
+        "<br><span style='font-size: smaller;'>(",
+        "IQR: ",
+        ifelse(is.nan(IQR_AME_NC), "NaN", round(IQR_AME_NC, 3)),
+        ")</span>"
+      )
+    ),
+    Median_AME_Full = ifelse(
+      is.na(median_AME_Full), 
+      "", 
+      paste0(
+        round(median_AME_Full, 3),
+        "<br><span style='font-size: smaller;'>(",
+        "IQR: ",
+        ifelse(is.nan(IQR_Full), "NaN", round(IQR_Full, 3)),
+        ")</span>"
+      )
+    ),
+    Median_Indirect = ifelse(
+      is.na(median_indirect), 
+      "", 
+      paste0(
+        round(median_indirect, 3),
+        "<br><span style='font-size: smaller;'>(",
+        "IQR: ",
+        ifelse(is.nan(IQR_indirect), "NaN", round(IQR_indirect, 3)),
+        ")</span>"
+      )
+    ),
+    Median_Pct_Change = ifelse(
+      is.na(median_proportion), 
+      "", 
+      paste0(
+        round(median_proportion * -100, 0),
+        "<br><span style='font-size: smaller;'>(",
+        "IQR: ",
+        ifelse(is.nan(IQR_proportion), "NaN", round(IQR_proportion, 3)),
+        ")</span>"
+      )
+    ),
+    Variable = fct_relevel(
+      Variable,
+      c("Popularity", "Degree Assortativity",
+        setdiff(unique(Variable), c("Popularity", "Degree Assortativity", "Triadic Closure")),
+        "Triadic Closure")
+    ),
+    Spacer = ""
+  ) |>  
+  arrange( Variable) |>  
+  select(
+    Variable,
+    n_coef,
+    percentage_significant,
+    Spacer,  
+    Median_AME_NC, 
+    Median_AME_Full,
+    Median_Indirect,
+    Median_Pct_Change,
+  ) |> 
+  as_tibble()
+
+
+
+
+
+
+
+# Construct stratified GT Table
+gtTable <- mediation_df_summary |>  
+  mutate(
+    Variable = coef,
+    Median_AME_NC = ifelse(
+      is.na(median_AME_NC), 
+      "", 
+      paste0(
+        round(median_AME_NC, 3), 
+        "<br><span style='font-size: smaller;'>(",
+        "IQR: ",
+        ifelse(is.nan(IQR_AME_NC), "NaN", round(IQR_AME_NC, 3)),
+        ")</span>"
+      )
+    ),
+    Median_AME_Full = ifelse(
+      is.na(median_AME_Full), 
+      "", 
+      paste0(
+        round(median_AME_Full, 3),
+        "<br><span style='font-size: smaller;'>(",
+        "IQR: ",
+        ifelse(is.nan(IQR_Full), "NaN", round(IQR_Full, 3)),
+        ")</span>"
+      )
+    ),
+    Median_Indirect = ifelse(
+      is.na(median_indirect), 
+      "", 
+      paste0(
+        round(median_indirect, 3),
+        "<br><span style='font-size: smaller;'>(",
+        "IQR: ",
+        ifelse(is.nan(IQR_indirect), "NaN", round(IQR_indirect, 3)),
+        ")</span>"
+      )
+    ),
+    Median_Pct_Change = ifelse(
+      is.na(median_proportion), 
+      "", 
+      paste0(
+        round(median_proportion * -100, 0),
+        "<br><span style='font-size: smaller;'>(",
+        "IQR: ",
+        ifelse(is.nan(IQR_proportion), "NaN", round(IQR_proportion, 3)),
+        ")</span>"
+      )
+    ),
+    Variable = fct_relevel(
+      Variable,
+      c("Popularity", "Degree Assortativity",
+        setdiff(unique(Variable), c("Popularity", "Degree Assortativity", "Triadic Closure")),
+        "Triadic Closure")
+    ),
+    network_type = factor(
+      network_type_cat,
+      levels = c("Integrated Networks", "Structural Hole Spanners")
+    ),
+    Spacer = ""
+  ) |>  
+  arrange(network_type, Variable) |>  
+  select(
+    Variable,
+    n_coef,
+    percentage_significant,
+    Spacer,  
+    Median_AME_NC, 
+    Median_AME_Full,
+    Median_Indirect,
+    Median_Pct_Change,
+    network_type
+  ) |> 
+  as_tibble()
+
+
+
+
+# Grouping indices
+rows_integrated <- which(gtTable$network_type == "Integrated Networks")
+rows_structural <- which(gtTable$network_type == "Structural Hole Spanners")
+
+# Clean for rendering
+gtTable_overall <- gtTable_overall
+gtTable <- gtTable |> select(-network_type)
+
+# Create GT Table stratified
+gtTable |> 
+  gt::gt() |>  
+  fmt_markdown(columns = everything()) |>  
+  cols_align(align = "left", columns = c(Variable)) |>  
+  cols_width(
+    Variable ~ px(200),
+    n_coef ~ px(100),
+    Spacer ~ px(30),
+    percentage_significant ~ px(130),
+    Median_AME_NC ~ px(130),
+    Median_AME_Full ~ px(130),
+    Median_Indirect ~ px(130),
+    Median_Pct_Change ~ px(130)
+  ) |>  
+  cols_label(
+    n_coef = md("Number of<br>Coefficients"),
+    Spacer = md("&nbsp;"),
+    percentage_significant = md("% Significant<br>Mediation"),
+    Median_AME_NC = md("Median AME<br>(NC) ×10"),
+    Median_AME_Full = md("Median AME<br>(Full) ×10"),
+    Median_Indirect = md("Median Indirect<br>Effect ×10"),
+    Median_Pct_Change = md("Median %<br>Change")
+  ) |>  
+  tab_row_group(
+    label = md("*Overall Summary Across Networks*"),
+    rows = rows_overall
+  ) |>  
+  tab_row_group(
+    label = md("*Integrated Network Types*"),
+    rows = rows_integrated
+  ) |>  
+  tab_row_group(
+    label = md("*Structural Hole Types*"),
+    rows = rows_structural
+  ) |>  
+  tab_source_note(
+    source_note = md("*Source: Author's computation of the median total, direct, and indirect average marginal effects (×10) for the nested NC and Full model across 14 ERGMs fit to the same VK Network data.*")
+  ) |> 
+  tab_header(title = md("**Part II: Network-Type-Specific Summary**")) 
+
+
+# Create GT Table overall
+
+gtTable_overall |> 
+  gt::gt() |>  
+  fmt_markdown(columns = everything()) |>  
+  cols_align(align = "left", columns = c(Variable)) |>  
+  cols_width(
+    Variable ~ px(200),
+    n_coef ~ px(100),
+    Spacer ~ px(30),
+    percentage_significant ~ px(130),
+    Median_AME_NC ~ px(130),
+    Median_AME_Full ~ px(130),
+    Median_Indirect ~ px(130),
+    Median_Pct_Change ~ px(130)
+  ) |>  
+  cols_label(
+    n_coef = md("Number of<br>Coefficients"),
+    Spacer = md("&nbsp;"),
+    percentage_significant = md("% Significant<br>Mediation"),
+    Median_AME_NC = md("Median AME<br>(NC) ×10"),
+    Median_AME_Full = md("Median AME<br>(Full) ×10"),
+    Median_Indirect = md("Median Indirect<br>Effect ×10"),
+    Median_Pct_Change = md("Median %<br>Change")
+  ) |> 
+  tab_header(title = md("**Part I: Overall Network Summary**")) 
+
+
+
+
+```
+
+```{r Goodness of Fit I}
+#| message: false
+#| warning: false
+#| echo: false
+
+
+# We check whether the empirical distribution of geodesic distances
+# and shared partner counts can be explained by the model:
+my_fit <- full_model_results |> 
+  map(~gof(.x ,  GOF = ~ degree + espartners + distance - model,  control = control.gof.ergm(seed = 888)))
+  
+my_fit |> 
+  walk(plot)
+# Plots look like a good fit when the empirical data (black
+# line) are located well within the cloud of simulated data
+# (boxplots, central 95% intervals) on these additional
+# dimensions.
+# NOTE that models for bigger networks and of gatekeeper type deviate from this trend  
+par(mfrow = c(2,2), family = "serif")
+plot(my_fit[[9]], main = '', family = "serif")
+
+
+
+```
+
+```{r MCMC diagnostics}
+#| message: false
+#| warning: false
+#| echo: false
+
+
+#  Markov Chain Monte Carlo diagnostics
+mcmc_diagnostics <- full_model_results_absdiff |> 
+  map(mcmc.diagnostics) 
+# all models did properly converge 
+
+```
+
+# Study 3: Structural Topic Modeling
+
+```{r}
+library(stringr)
+library(textclean)
+
+emoji_regex <- paste0(
+  "(",
+    "[\U0001F600-\U0001F64F]",      # Emoticons
+    "|[\U0001F300-\U0001F5FF]",     # Symbols & Pictographs
+    "|[\U0001F680-\U0001F6FF]",     # Transport & Map Symbols
+    "|[\U0001F1E0-\U0001F1FF]",     # Flags (iOS)
+    "|[\U00002700-\U000027BF]",     # Dingbats
+    "|[\U0001F900-\U0001F9FF]",     # Supplemental Symbols and Pictographs
+    "|[\U0001FA70-\U0001FAFF]",     # Symbols and Pictographs Extended-A 
+    "|[\U00002600-\U000026FF]",     # Misc symbols
+    "|[\U0001F018-\U0001F270]",     # Various emoji ranges
+    "|[\U000024C2-\U0001F251]",     # Enclosed characters
+    "|[\U0001F1F2-\U0001F1F4]{1,2}",# Regional flags
+    "|[\U0001F1E6-\U0001F1FF]{2}",  # Flags
+    "|\u200D",                      # Zero Width Joiner for compound emojis
+    "|\u2640|\u2642",              # Gender symbols
+    "|\uFE0F",                      # Variation selectors
+    "|\u23CF|\u23E9|\u231A",       # Misc emoji symbols
+    "|\uD83C[\uDFFB-\uDFFF]",      # Skin tone modifiers
+  ")"
+)
+
+
+wall_posts_1_cleaned <- networks_labeled[[2]]$wall_posts_labeled |> 
+  mutate(
+    # Clean unwanted text patterns
+    post_text_clean = str_remove_all(post_text, "\\[.*?\\|.*?\\]"),      # [id123|Name]
+    post_text_clean = str_remove_all(post_text_clean, "\\[.*?\\]"),           # [alias]
+    post_text_clean = str_remove_all(post_text_clean, "@\\w+"),               # @mentions
+    post_text_clean = str_remove_all(post_text_clean, "#\\S+"),               # hashtags
+    post_text_clean = str_remove_all(post_text_clean, "http[s]?://\\S+"),     # URLs
+    post_text_clean = str_remove_all(post_text_clean, "https?:\\S*"),         # '.https:' stubs
+    post_text_clean = str_remove_all(post_text_clean, "vk\\.cc/\\S+"),        # short links
+
+    # Remove emojis and emoticons
+    post_text_clean = str_remove_all(post_text_clean, emoji_regex),
+    post_text_clean = rm_emoticon(post_text_clean),
+
+    # Remove escaped backslashes and HTML tags
+    post_text_clean = str_replace_all(post_text_clean, "\\\\", ""),            # remove backslashes like \Влад
+    post_text_clean = str_remove_all(post_text_clean, "<[^>]+>"),              # remove HTML tags like <br>, <b> etc.
+
+    # Normalize whitespace and line breaks
+    post_text_clean = str_replace_all(post_text_clean, "\\n", " "),            # replace newlines with space
+    post_text_clean = str_squish(post_text_clean)                              # collapse multiple spaces
+  )
+
+# check text for issues 
+check_text <- textclean::check_text(wall_posts_1_cleaned$post_text)
+check_text_clean <- textclean::check_text(wall_posts_1_cleaned$post_text_clean)
+
+
+wall_posts_1_cleaned$post_text_clean[147]
+
+
+check_text_clean$elemental_checks
+
+
+
+# next steps: map this pipleine to all the wallposts, filter for date and language brokered texts, transltae them to english with deepl 
+```
+
+```{r}
+
+  # function to clean text
+  clean_text <- function(text, emoji_regex) {
+    text |> 
+      str_remove_all("\\[.*?\\|.*?\\]") |>            # [id123|Name]
+      str_remove_all("\\[.*?\\]") |>               # [alias]
+      str_remove_all("@\\w+") |>                    # @mentions
+      str_remove_all("#\\S+") |>                     # hashtags
+      str_remove_all("http[s]?://\\S+") |>          # URLs
+      str_remove_all("https?:\\S*") |>               # '.https:' stubs
+      str_remove_all("vk\\.cc/\\S+") |>             # short links
+      str_remove_all(emoji_regex) |>                 # emoji
+      rm_emoticon() |>                               # emoticons
+      str_replace_all("\\\\", "") |>                 # remove backslashes like \Влад
+      str_remove_all("<[^>]+>") |>                   # HTML tags
+      str_replace_all("\\n", " ") |>              # newlines to spaces
+      str_remove_all(post_text_clean, "\\[.*?\\|.*?\\]") |> 
+      str_remove_all(post_text_clean, "\\[.*?\\]") |> 
+      str_remove_all(post_text_clean, "\\[#alias\\|.*?\\|.*?\\]") |> 
+      str_squish()                                    # trim and collapse multiple spaces
+  }
+
+
+p <- networks_labeled[[1]]$wall_posts_labeled
+
+```
+
+```{r Extend of Language Brokering between RU and DE users}
+# Answer the research question: To what extend?
+
+user_wall_df_combined <- networks_labeled |> 
+  map(\(x) x$wall_posts_labeled) |> 
+  bind_rows()
+
+#filter for only unique posts 
+user_wall_df_unique <-  user_wall_df_combined |> 
+  distinct(post_text_clean, .keep_all = TRUE)
+
+# Initial stats
+n_user_initially <- user_wall_df_unique |> summarise(n_user = n_distinct(user_id)) |> pull(n_user)
+n_post_initially <- nrow(user_wall_df_unique)
+
+# Filter for posts after invasion
+ invasion_date <- as.Date("2022-02-24")
+# posts_after_invasion <- user_wall_df_unique |> filter(post_date >= invasion_date) 
+# n_user_post <- posts_after_invasion |> summarise(n_user = n_distinct(user_id)) |> pull(n_user)
+# n_post_post <- nrow(posts_after_invasion)
+# 
+# # Reduction after invasion
+# post_reduction_pct <- (1 - (n_post_post / n_post_initially)) * 100
+# user_reduction_pct <- (1 - (n_user_post / n_user_initially)) * 100
+# cat(glue("After filtering for posts since 2022-02-24:
+# - Posts reduced from {n_post_initially} to {n_post_post} ({round(post_reduction_pct, 2)}%)
+# - Users reduced from {n_user_initially} to {n_user_post} ({round(user_reduction_pct, 2)}%)\n\n"))
+
+# Filter for language-brokered posts
+lang_brokered_df <- user_wall_df_unique |> 
+  filter(
+    post_text_cld2 %in% c("ru", "de"),
+    (
+      (post_text_cld2 != attachment_text_cld2 & attachment_text_cld2 %in% c("ru", "de")) |
+      (post_text_cld2 != link_title_cld2 & link_title_cld2 %in% c("ru", "de")) |
+      (post_text_cld2 != link_source & link_source %in% c("ru", "de"))
+    )
+  ) 
+
+# Stats on language-brokered posts
+n_user_brokered <- lang_brokered_df |> summarise(n_user = n_distinct(user_id)) |> pull(n_user)
+n_post_brokered <- nrow(lang_brokered_df)
+
+# Reductions relative to initally-filtered set
+post_brokered_reduction_pct <- (1 - (n_post_brokered / n_post_initially)) * 100
+user_brokered_reduction_pct <- (1 - (n_user_brokered / n_user_initially)) * 100
+
+cat(glue("Among the unique posts filtered for language-brokered posts:
+- Posts reduced from {n_post_initially} to {n_post_brokered} ({round(post_brokered_reduction_pct, 2)}%)
+- Users reduced from {n_user_initially} to {n_user_brokered} ({round(user_brokered_reduction_pct, 2)}%)\n"))
+
+# Count brokered posts written in DE (Russian -> German brokers)
+n_brokered_to_de <- lang_brokered_df |> 
+  filter(post_text_cld2 == "de") |> 
+  nrow()
+
+# Count brokered posts written in RU (German -> Russian brokers)
+n_brokered_to_ru <- lang_brokered_df |> 
+  filter(post_text_cld2 == "ru") |> 
+  nrow()
+
+# Total brokered posts
+n_total_brokered_posts <- nrow(lang_brokered_df)
+
+# Calculate percentages
+pct_to_de <- (n_brokered_to_de / n_total_brokered_posts) * 100
+pct_to_ru <- (n_brokered_to_ru / n_total_brokered_posts) * 100
+
+# Report
+cat(glue(
+  "Among the {n_total_brokered_posts} language-brokered posts:\n",
+  "- {n_brokered_to_de} posts ({round(pct_to_de, 2)}%) are brokered to German (post written in DE)\n",
+  "- {n_brokered_to_ru} posts ({round(pct_to_ru, 2)}%) are brokered to Russian (post written in RU)"
+))
+
+# calculate hoe many posts before and after war in Ukraine 
+   
+lang_brokered_df |> 
+  summarise(
+    oldest_post = min(post_date, na.rm = TRUE),
+    newest_post = max(post_date, na.rm = TRUE),
+    total_posts = n(),
+    posts_after_invasion = sum(post_date >= invasion_date, na.rm = TRUE),
+    posts_before_invasion = total_posts - posts_after_invasion,
+    percentage_after_invasion = (posts_after_invasion / total_posts) * 100
+  )
+
+
+
+
+#meaningfully interact 
+
+
+
+
+  # lang_brokered_df$post_text_clean[641] |>      str_remove_all(regex(
+  #     "(\\(*\\s*(KLICK|LIVETICKER|WEBSEITE|TELEGRAM|CHAT|FILME|Portal|Портал|Russland[- ]?Deutsche|Россия Германия)\\s*\\)*)",
+  #     ignore_case = TRUE
+  #   )) |>
+  # 
+  #   # Also catch e.g. "FILME (" or "Portal ("
+  #   str_remove_all("\\b\\p{L}{2,}\\s*\\(\\s*\\)?") |>    
+  #   str_remove_all("\\(\\s*\\)") 
+
+```
+
+```{r prepare post_text for maschine translation}
+
+# check the post text clean for issues 
+check_text <- textclean::check_text(lang_brokered_df$post_text_clean)
+
+# clean remainders 
+
+lang_brokered_df$post_text_clean <- lang_brokered_df$post_text_clean |>
+  str_remove_all(regex(
+    "(\\(*\\s*(KLICK|LIVETICKER|WEBSEITE|TELEGRAM|CHAT|FILME|Portal|Портал)\\s*\\)*)",
+    ignore_case = TRUE
+  )) |> 
+  str_remove_all("\\(\\s*\\)")  |>                      # empty parentheses
+  add_missing_endmark(replacement = ".") |> 
+ # add_comma_space() |>
+  replace_kern() |>   
+  str_squish() 
+  
+
+# filter for posts with minimum 5 words 
+lang_brokered_filtered <- lang_brokered_df |>
+  filter(str_count(post_text_clean, "\\w+") >= 5)
+
+
+# check for duplicates 
+sum(duplicated(lang_brokered_filtered$post_text_clean))
+
+
+
+# count character -- before cleaning 
+total_chars <- sum(nchar(lang_brokered_filtered$post_text_clean))
+
+
+```
+
+```{r Translation with DeeplAPI}
+# Install and load packages
+install.packages("devtools")
+devtools::install_github("zumbov2/deeplr")
+
+library(deeplr)
+library("tm")
+
+
+# Set API key
+Sys.setenv(DEEPL_API_KEY = "b0488e6b-1c9b-40d8-b1ab-a3a4951347b1:fx")
+
+# Optional: check languages and usage
+langs <- deeplr::available_languages2()
+deeplr::usage2()
+
+#lang_brokered_EN <- lang_brokered_filtered 
+#lang_brokered_EN$post_text_EN <- NA_character_
+
+
+# Translate it and continue where it has stopped (= NA)
+
+
+# Loop over rows
+for (i in seq_len(nrow(lang_brokered_EN))) {
+  
+  # Check if translation is needed
+  if (is.na(lang_brokered_EN$post_text_EN[i])) {
+    
+
+      # Translate and store
+      lang_brokered_EN$post_text_EN[i] <- deeplr::translate2(
+        text = lang_brokered_EN$post_text_clean[i],
+        target_lang = "EN"
+      )
+      
+      # Sleep to avoid hitting API rate limit
+      Sys.sleep(1.5)
+    }
+  }
+
+
+
+#safe and read
+#saveRDS(lang_brokered_EN, file = "lang_brokered_EN.rds")
+lang_brokered_EN <- readRDS("lang_brokered_EN.rds")
+
+# check again
+check_text <- textclean::check_text(lang_brokered_EN$post_text_EN)  
+
+# clean it 
+lang_brokered_EN <- lang_brokered_EN |> 
+  mutate(
+    post_text_EN_clean = str_replace_all(post_text_EN, regex("\\bAnti[- ]Spiegel\\b", ignore_case = TRUE), "AntiSpiegel"), # Anti-Spiegel risk being seperated otherwise
+    post_text_EN_clean = replace_contraction(post_text_EN_clean),
+    post_text_EN_clean = replace_non_ascii(post_text_EN_clean),
+    post_text_EN_clean = gsub("[[:punct:]]+", " ", post_text_EN_clean),  # this is because of excessive use of "!!!" in the documents 
+    post_text_EN_clean = removeWords(post_text_EN_clean, stopwords("german")), # due to code mixing there are some German phrases within the translated texts, I filter common German stopwords, so they don't disturb the model: basically eliminating non-English text 
+    post_text_EN_clean = strip(post_text_EN_clean)
+  )
+
+ check_text <- textclean::check_text(lang_brokered_EN$post_text_EN_clean) # check again / looks good now 
+```
+
+```{r Structural Topic Modeling}
+library(stm)
+library(tm)
+library("wordcloud")
+
+# create meta data 
+metadata_df <- data.frame(cld2 = lang_brokered_EN$post_text_cld2)
+
+# Run textProcessor
+processed <- textProcessor(
+  lang_brokered_EN$post_text_EN_clean,
+  metadata = metadata_df,
+  lowercase = TRUE,
+  removestopwords = TRUE,               
+  removenumbers = TRUE,
+  removepunctuation = TRUE,
+  ucp = FALSE,
+  stem = TRUE,
+  wordLengths = c(3, Inf),
+  sparselevel = 1,
+  language = "en",
+  verbose = TRUE,
+  onlycharacter = FALSE,
+  striphtml = FALSE,
+  customstopwords = NULL,
+  custompunctuation = NULL,
+  v1 = FALSE
+)
+
+
+# Prepare documents for STM
+prep <- prepDocuments(
+  documents = processed$documents,
+  vocab = processed$vocab,
+  meta = processed$meta,
+  lower.thresh = 3,   #  words which appear in only three document will be dropped / helpful to fully eliminate code-mixing behavior.
+  upper.thresh = Inf,
+  subsample = NULL,
+  verbose = TRUE
+)
+
+str(prep$meta)
+
+# Removing 5012 of 6844 terms (6993 of 31853 tokens) due to frequency 
+# Removing 1 Documents with No Words 
+# Your corpus now has 707 documents, 1831 terms and 24860 tokens.
+      #707 documents: This is a reasonable number. STM can handle as few as 100–200, but 500–1000 is preferable.
+      #1831 terms: Manageable dimensionality. Enough for meaningful topics..
+      #~24,860 tokens (word count): Gives about 35 eords per document on average, which is decent.
+# -> balanced corpus
+
+
+# determine fit based on scores
+fit_evaluation <- searchK(prep$documents, prep$vocab, K = c(2:20), data = prep$meta, init.type = "Spectral") # "Spectral" argument automatically estimates the best solution  for a given number of topics, meaning we do not need to assign random seeds/numbers and  evaluate which topic composition is the best
+
+saveRDS(fit_evaluation, file = "fit_evaluation_K2_to_K20.rds")
+fit_evaluation <- readRDS("fit_evaluation_K2_to_K20.rds")
+
+# wrangle fit data for plotting
+fit_evaluation_df <- fit_evaluation$results |>
+  unnest(cols = everything()) |> 
+  tibble() |> 
+  pivot_longer(cols = -K, names_to = "metric", values_to = "value") |>
+  mutate(metric = recode(metric,
+                         exclus = "Exclusivity",
+                         semcoh = "Semantic Coherence",
+                         heldout = "Held-out Likelihood",
+                         residual = "Residuals"))
+
+
+# Plot selected statitics with labels
+fit_evaluation_df |>
+  filter(metric %in% c("Exclusivity", 
+                       "Semantic Coherence", 
+                       "Held-out Likelihood", 
+                       "Residuals")) |>
+  ggplot(aes(x = K, y = value)) +
+  geom_line(color = "#8da0cb") +
+  geom_point(color = "#8da0cb") +
+  facet_wrap(~ metric, scales = "free_y") +
+  labs(
+       x = "Number of Topics (K)",
+       y = "Metric Value") +
+  theme_minimal(base_size = 14, base_family = "TimesNewRoman")
+
+
+#consider models with topics 5, 6, 7, 8, 9, 10
+
+
+# Estimate models with 5, 6, 7, 8, 9, 10 topics
+stm_k5 <- stm(prep$documents, prep$vocab, K = 5, data = prep$meta, init.type = "Spectral")
+labelTopics(stm_k5, n = 20)
+cloud(stm_k5, topic = 1, scale = c(2, 0.25))
+
+
+stm_k6 <- stm(prep$documents, prep$vocab, K = 6, data = prep$meta, init.type = "Spectral") # this is the best model: Balanced topic resolution (not too coarse like K=5, not too fragmented like K=8).
+labelTopics(stm_k6, n = 20)
+cloud(stm_k6, topic = 1, scale = c(2, 0.25))
+saveRDS(stm_k6, "ST_Model_K6") # save best fitting Model
+
+
+stm_k7 <- stm(prep$documents, prep$vocab, K = 7, data = prep$meta, init.type = "Spectral")
+labelTopics(stm_k7, n = 20)
+cloud(stm_k6, topic = 1, scale = c(2, 0.25))
+
+stm_k8 <- stm(prep$documents, prep$vocab, K = 8, data = prep$meta, init.type = "Spectral")
+labelTopics(stm_k8, n = 20)
+cloud(stm_k6, topic = 1, scale = c(2, 0.25))
+
+
+stm_k9 <- stm(prep$documents, prep$vocab, K = 9, data = prep$meta, init.type = "Spectral")
+labelTopics(stm_k9, n = 20)
+cloud(stm_k6, topic = 1, scale = c(2, 0.25))
+
+
+stm_k10 <- stm(prep$documents, prep$vocab, K = 10, data = prep$meta, init.type = "Spectral")
+labelTopics(stm_k10, n = 20)
+cloud(stm_k6, topic = 1, scale = c(2, 0.25))
+
+
+# find representative paragraphs for each topic for stm_6
+
+texts_filtered <- lang_brokered_EN$post_text_EN[-prep$docs.removed]
+paragraph <- findThoughts(stm_k6, n = 20, topics = 2, texts = texts_filtered)$docs[[1]]
+par(mfrow = c(1, 2), mar = c(0.5, 0.5, 1, 0.5))
+plotQuote(paragraph, main = "Topic 2")
+
+
+# plot topic prevalence 
+
+
+plot(stm_k6, type = "summary", xlim = c(0, 0.3))
+
+
+# plot per covariate
+
+# for model with k6
+estimate_k6 <- estimateEffect(1:6 ~ cld2, 
+                          stm_k6, 
+                          meta = prep$meta, 
+                          uncertainty = "Global")
+
+summary(estimate_k6)
+
+
+# set Times New Romans
+windowsFonts(Times=windowsFont("Times New Roman"))  
+par(family = "Times") 
+
+plot(estimate_k6, 
+     covariate = "cld2", 
+     topics = c(1:6), 
+     model = stm_k6, 
+     method = "difference", 
+     cov.value1 = "de", 
+     cov.value2 = "ru", 
+    # main = "Effect of Post Language on Topic Prevalence",
+       xlab = "More common in Russian   ←  Difference in Narrative Prevalence  →    More common in German",
+     xlim = c(-0.15, 0.1),
+     labeltype = "custom",
+     custom.labels = c(" War in Ukraine Narrative", "Anti-elitism Narrative", "Soviet Legacy Narrative", "Anti-Mainstream Narrative", "Western Aggression Narrative", "Topic of Russian Transnational Life"))
+mtext("Source: Author’s calculation using the stm package", 
+      side = 1,          
+      line = 4,          
+      adj = 1,           
+      cex = 1,           
+      font = 3)         
+
+
+
+
+```
+
+```{r Topic Model appendix}
+
+# create word clouds
+# word clouds for each topic 
+for (i in 1:6) {
+  cloud(stm_k6, topic = i, scale = c(2, 0.25))
+}
+
+# Plot word clouds for each topic and title them "Narrative 1" through "Narrative 6"
+par(mfrow = c(2, 3))  # Arrange plots in 2 rows, 3 columns
+
+cloud(stm_k6, topic = 1, scale = c(2, 0.25), type = "frex")
+
+for (i in 1:6) {
+  cloud(stm_k6, topic = i, scale = c(2, 0.25), max.words = 30)
+  title(paste("Narrative", i))
+}
+
+
+# create representative terms table
+
+# Run the labelTopics function
+
+topic_label_df <- tibble()
+
+for (i in 1:6) {
+  topics <- tibble(
+    "Labels" = paste0("Narrative ", i),
+    "Highest probability words" = paste(topic_labels$prob[i, ], collapse = ", "),
+    "FREX words" = paste(topic_labels$frex[i, ], collapse = ", ")
+  )
+  
+  topic_label_df <- bind_rows(topic_label_df, topics)  # Append in correct order
+}
+  
+
+# create table
+
+topic_label_df |>
+  gt::gt() |>
+  cols_width(
+    Labels ~ px(120),  # narrow width for Labels
+    `Highest probability words` ~ px(300),  # wider spacing
+    `FREX words` ~ px(300)
+  ) |>
+  tab_spanner(
+    label = "Representative terms",
+    columns = c("Highest probability words", "FREX words")
+  ) |>
+  opt_table_font(
+    font = list(
+      google_font("Times New Roman"),
+      default_fonts()
+    )
+  )|>
+  opt_table_font(font = "Times New Roman") |>
+  tab_source_note(
+    source_note = "Source: Author’s estimation applying STM to VK User Wall data."
+  ) |>
+  tab_source_note(
+    source_note = "Note: 'Highest probability' words are the most likely in each topic; 'FREX' words are frequent and exclusive, helping to distinguish topics."
+  )
+
+```
+
+```{r test}
+
+# k7
+
+prep_k7 \<- estimateEffect(1:7 \~ cld2, stm_k7, meta = prep\$meta, uncertainty = "Global")
+
+summary(prep_k7)
+
+plot(prep_k7, covariate = "cld2", topics = c(1:7), model = stm_k7, method = "difference", cov.value1 = "de", cov.value2 = "ru", xlab = "More Russian-language posts ← Difference in Topic Prevalence → More German-language posts", main = "Effect of Region on Topic Prevalence", #xlim = c(-0.1, 0.1), labeltype = "custom", custom.labels = c("Topic 1", "Topic 2", "Topic 3", "Topic 4", "Topic 5", "Topic 6", "Topic 7"))
+
+# k9
+
+prep_k9 \<- estimateEffect(1:9 \~ cld2, stm_k9, meta = prep\$meta, uncertainty = "Global")
+
+summary(prep_k9)
+
+plot(prep_k9, covariate = "cld2", topics = c(1:9), model = stm_k9, method = "difference", cov.value1 = "de", cov.value2 = "ru", xlab = "More German-language posts ← Difference in Topic Prevalence → More Russian-language posts", main = "Effect of Region on Topic Prevalence", #xlim = c(-0.1, 0.1), labeltype = "custom", custom.labels = c("Topic 1", "Topic 2", "Topic 3", "Topic 4", "Topic 5", "Topic 6", "Topic 7", "Topic 8", "Topic 9"))
+
+# k7
+
+prep_k7 \<- estimateEffect(1:7 \~ cld2, stm_k7, meta = prep\$meta, uncertainty = "Global")
+
+summary(prep_k7)
+
+plot(prep_k7, covariate = "cld2", topics = c(1:7), model = stm_k7, method = "difference", cov.value1 = "de", cov.value2 = "ru", xlab = "More German-language posts ← Difference in Topic Prevalence → More Russian-language posts", main = "Effect of Region on Topic Prevalence", #xlim = c(-0.1, 0.1), labeltype = "custom", custom.labels = c("Topic 1", "Topic 2", "Topic 3", "Topic 4", "Topic 5", "Topic 6", "Topic 7"))
+
+# k8
+
+prep_k8 \<- estimateEffect(1:8 \~ cld2, stm_k8, meta = prep\$meta, uncertainty = "Global")
+
+summary(prep_k8)
+
+plot(prep_k8, covariate = "cld2", topics = c(1:8), model = stm_k8, method = "difference", cov.value1 = "de", cov.value2 = "ru", xlab = "More German-language posts ← Difference in Topic Prevalence → More Russian-language posts", main = "Effect of Region on Topic Prevalence", #xlim = c(-0.1, 0.1), labeltype = "custom", custom.labels = c("Topic 1", "Topic 2", "Topic 3", "Topic 4", "Topic 5", "Topic 6", "Topic 7", "Topic 8"))
+
+# k10
+
+# prep_k10 \<- estimateEffect(1:10 \~ cld2,
+
+# stm_k10,
+
+# meta = prep\$meta,
+
+# uncertainty = "Global")
+
+# 
+
+# summary(prep_k10)
+
+# 
+
+# 
+
+# 
+
+# plot(prep_k10,
+
+# covariate = "cld2",
+
+# topics = c(1:10),
+
+# model = stm_k10,
+
+# method = "difference",
+
+# cov.value1 = "de",
+
+# cov.value2 = "ru",
+
+# xlab = "More German-language posts ← Difference in Topic Prevalence → More Russian-language posts",
+
+# main = "Effect of Region on Topic Prevalence",
+
+# #xlim = c(-0.1, 0.1),
+
+# labeltype = "custom",
+
+# custom.labels = c("Topic 1", "Topic 2", "Topic 3", "Topic 4", "Topic 5", "Topic 6", "Topic 7", "Topic 8", "Topic 9", "Topic 10"))
+
+# 
+
+# \`\`\`

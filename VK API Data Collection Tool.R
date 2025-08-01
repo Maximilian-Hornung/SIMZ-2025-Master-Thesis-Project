@@ -319,15 +319,15 @@ ego_friends <- friends_get(user_id = ego$id, access_token = access_token, n_user
 ## Set Arguments ####
 
 #setwd
-setwd("C:/Users/hornu/OneDrive/Master Social Scientific Data Analysis/Courses/SIMZ-2025 - Master Thesis Course/20250206 Spring Thesis Work/VK Network Data") #location where the file is being saved
+setwd("") #location where the file is being saved
 
 ## VK access token 
 #browseURL("https://vkhost.github.io/") #to get you access token
 #browseURL("https://dev.vk.com/en/api/api-requests") #to view API documentation
 
-access_token <- "vk1.a.7RCGumxfITyEglGdOQwSnngXdJGoFhuQKG1uPZoDHVTYu6ntXdiCk6YpG72IXV1voG0KxiscUCZPM1BgAt7gNnx1nPWeQ6esegeiCs7oCxGD-3so9hYOO40WJxeSq33BxQnNLHhGolky4qeo4Evcpzg5_aaWZDuXZjZmhrRP1sx6ufAvdI4ZUacFhELTZLRhiewyEi4MI-J-NqAOcA6j0g"
+access_token <- ""
 
-user_id <- "850793471"  # bilingual user id
+user_id <- ""  # bilingual user id
 
 n_user <- 50   # this argument decides how many friends are being scraped and is multiplied by 100 (e.g. 50 * 100 = max 5000 friends)
 
@@ -335,17 +335,22 @@ wall_count <- 100 # how many user posts are being scraped (note: the API method 
 
 
 
-
 ## Execute Function ####
 
 ego_network_get(user_id = user_id, access_token = access_token, n_user = n_user, degree_1.5 = TRUE, wall_count = wall_count, save_as_RDS = TRUE) 
  
+# create a list a loop through it
+
+user_list <- list("")
 
 
+users_ego_network <- lapply(user_list_6, function(user) {
+  ego_network_get(user_id = user, access_token = access_token, 
+                  n_user = n_user, degree_1.5 = TRUE, 
+                  wall_count = wall_count, save_as_RDS = FALSE)
+})
 
-
-
-
+saveRDS(users_ego_network, file = "")
 
 
 
