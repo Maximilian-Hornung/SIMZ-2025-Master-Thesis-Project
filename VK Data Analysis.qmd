@@ -33,6 +33,10 @@ library(ergMargins)
 library(stringr)
 library(textclean)
 library(qdapRegex)
+install.packages("devtools")
+devtools::install_github("zumbov2/deeplr")
+library(deeplr)
+library("tm")
 
 # set wd
 setwd("C:/Users/hornu/OneDrive/Master Social Scientific Data Analysis/Courses/SIMZ-2025 - Master Thesis Course/20250206 Spring Thesis Work/VK Network Data")
@@ -2404,99 +2408,6 @@ mcmc_diagnostics <- full_model_results_absdiff |>
 
 # Study 3: Structural Topic Modeling
 
-```{r}
-library(stringr)
-library(textclean)
-
-emoji_regex <- paste0(
-  "(",
-    "[\U0001F600-\U0001F64F]",      # Emoticons
-    "|[\U0001F300-\U0001F5FF]",     # Symbols & Pictographs
-    "|[\U0001F680-\U0001F6FF]",     # Transport & Map Symbols
-    "|[\U0001F1E0-\U0001F1FF]",     # Flags (iOS)
-    "|[\U00002700-\U000027BF]",     # Dingbats
-    "|[\U0001F900-\U0001F9FF]",     # Supplemental Symbols and Pictographs
-    "|[\U0001FA70-\U0001FAFF]",     # Symbols and Pictographs Extended-A 
-    "|[\U00002600-\U000026FF]",     # Misc symbols
-    "|[\U0001F018-\U0001F270]",     # Various emoji ranges
-    "|[\U000024C2-\U0001F251]",     # Enclosed characters
-    "|[\U0001F1F2-\U0001F1F4]{1,2}",# Regional flags
-    "|[\U0001F1E6-\U0001F1FF]{2}",  # Flags
-    "|\u200D",                      # Zero Width Joiner for compound emojis
-    "|\u2640|\u2642",              # Gender symbols
-    "|\uFE0F",                      # Variation selectors
-    "|\u23CF|\u23E9|\u231A",       # Misc emoji symbols
-    "|\uD83C[\uDFFB-\uDFFF]",      # Skin tone modifiers
-  ")"
-)
-
-
-wall_posts_1_cleaned <- networks_labeled[[2]]$wall_posts_labeled |> 
-  mutate(
-    # Clean unwanted text patterns
-    post_text_clean = str_remove_all(post_text, "\\[.*?\\|.*?\\]"),      # [id123|Name]
-    post_text_clean = str_remove_all(post_text_clean, "\\[.*?\\]"),           # [alias]
-    post_text_clean = str_remove_all(post_text_clean, "@\\w+"),               # @mentions
-    post_text_clean = str_remove_all(post_text_clean, "#\\S+"),               # hashtags
-    post_text_clean = str_remove_all(post_text_clean, "http[s]?://\\S+"),     # URLs
-    post_text_clean = str_remove_all(post_text_clean, "https?:\\S*"),         # '.https:' stubs
-    post_text_clean = str_remove_all(post_text_clean, "vk\\.cc/\\S+"),        # short links
-
-    # Remove emojis and emoticons
-    post_text_clean = str_remove_all(post_text_clean, emoji_regex),
-    post_text_clean = rm_emoticon(post_text_clean),
-
-    # Remove escaped backslashes and HTML tags
-    post_text_clean = str_replace_all(post_text_clean, "\\\\", ""),            # remove backslashes like \Влад
-    post_text_clean = str_remove_all(post_text_clean, "<[^>]+>"),              # remove HTML tags like <br>, <b> etc.
-
-    # Normalize whitespace and line breaks
-    post_text_clean = str_replace_all(post_text_clean, "\\n", " "),            # replace newlines with space
-    post_text_clean = str_squish(post_text_clean)                              # collapse multiple spaces
-  )
-
-# check text for issues 
-check_text <- textclean::check_text(wall_posts_1_cleaned$post_text)
-check_text_clean <- textclean::check_text(wall_posts_1_cleaned$post_text_clean)
-
-
-wall_posts_1_cleaned$post_text_clean[147]
-
-
-check_text_clean$elemental_checks
-
-
-
-# next steps: map this pipleine to all the wallposts, filter for date and language brokered texts, transltae them to english with deepl 
-```
-
-```{r}
-
-  # function to clean text
-  clean_text <- function(text, emoji_regex) {
-    text |> 
-      str_remove_all("\\[.*?\\|.*?\\]") |>            # [id123|Name]
-      str_remove_all("\\[.*?\\]") |>               # [alias]
-      str_remove_all("@\\w+") |>                    # @mentions
-      str_remove_all("#\\S+") |>                     # hashtags
-      str_remove_all("http[s]?://\\S+") |>          # URLs
-      str_remove_all("https?:\\S*") |>               # '.https:' stubs
-      str_remove_all("vk\\.cc/\\S+") |>             # short links
-      str_remove_all(emoji_regex) |>                 # emoji
-      rm_emoticon() |>                               # emoticons
-      str_replace_all("\\\\", "") |>                 # remove backslashes like \Влад
-      str_remove_all("<[^>]+>") |>                   # HTML tags
-      str_replace_all("\\n", " ") |>              # newlines to spaces
-      str_remove_all(post_text_clean, "\\[.*?\\|.*?\\]") |> 
-      str_remove_all(post_text_clean, "\\[.*?\\]") |> 
-      str_remove_all(post_text_clean, "\\[#alias\\|.*?\\|.*?\\]") |> 
-      str_squish()                                    # trim and collapse multiple spaces
-  }
-
-
-p <- networks_labeled[[1]]$wall_posts_labeled
-
-```
 
 ```{r Extend of Language Brokering between RU and DE users}
 # Answer the research question: To what extend?
@@ -2586,22 +2497,6 @@ lang_brokered_df |>
   )
 
 
-
-
-#meaningfully interact 
-
-
-
-
-  # lang_brokered_df$post_text_clean[641] |>      str_remove_all(regex(
-  #     "(\\(*\\s*(KLICK|LIVETICKER|WEBSEITE|TELEGRAM|CHAT|FILME|Portal|Портал|Russland[- ]?Deutsche|Россия Германия)\\s*\\)*)",
-  #     ignore_case = TRUE
-  #   )) |>
-  # 
-  #   # Also catch e.g. "FILME (" or "Portal ("
-  #   str_remove_all("\\b\\p{L}{2,}\\s*\\(\\s*\\)?") |>    
-  #   str_remove_all("\\(\\s*\\)") 
-
 ```
 
 ```{r prepare post_text for maschine translation}
@@ -2640,16 +2535,9 @@ total_chars <- sum(nchar(lang_brokered_filtered$post_text_clean))
 ```
 
 ```{r Translation with DeeplAPI}
-# Install and load packages
-install.packages("devtools")
-devtools::install_github("zumbov2/deeplr")
-
-library(deeplr)
-library("tm")
-
 
 # Set API key
-Sys.setenv(DEEPL_API_KEY = "b0488e6b-1c9b-40d8-b1ab-a3a4951347b1:fx")
+Sys.setenv(DEEPL_API_KEY = "")
 
 # Optional: check languages and usage
 langs <- deeplr::available_languages2()
@@ -2802,6 +2690,7 @@ stm_k6 <- stm(prep$documents, prep$vocab, K = 6, data = prep$meta, init.type = "
 labelTopics(stm_k6, n = 20)
 cloud(stm_k6, topic = 1, scale = c(2, 0.25))
 saveRDS(stm_k6, "ST_Model_K6") # save best fitting Model
+stm_k6  <- readRDS("ST_Model_K6.rds")
 
 
 stm_k7 <- stm(prep$documents, prep$vocab, K = 7, data = prep$meta, init.type = "Spectral")
@@ -2939,86 +2828,5 @@ topic_label_df |>
     source_note = "Note: 'Highest probability' words are the most likely in each topic; 'FREX' words are frequent and exclusive, helping to distinguish topics."
   )
 
+
 ```
-
-```{r test}
-
-# k7
-
-prep_k7 \<- estimateEffect(1:7 \~ cld2, stm_k7, meta = prep\$meta, uncertainty = "Global")
-
-summary(prep_k7)
-
-plot(prep_k7, covariate = "cld2", topics = c(1:7), model = stm_k7, method = "difference", cov.value1 = "de", cov.value2 = "ru", xlab = "More Russian-language posts ← Difference in Topic Prevalence → More German-language posts", main = "Effect of Region on Topic Prevalence", #xlim = c(-0.1, 0.1), labeltype = "custom", custom.labels = c("Topic 1", "Topic 2", "Topic 3", "Topic 4", "Topic 5", "Topic 6", "Topic 7"))
-
-# k9
-
-prep_k9 \<- estimateEffect(1:9 \~ cld2, stm_k9, meta = prep\$meta, uncertainty = "Global")
-
-summary(prep_k9)
-
-plot(prep_k9, covariate = "cld2", topics = c(1:9), model = stm_k9, method = "difference", cov.value1 = "de", cov.value2 = "ru", xlab = "More German-language posts ← Difference in Topic Prevalence → More Russian-language posts", main = "Effect of Region on Topic Prevalence", #xlim = c(-0.1, 0.1), labeltype = "custom", custom.labels = c("Topic 1", "Topic 2", "Topic 3", "Topic 4", "Topic 5", "Topic 6", "Topic 7", "Topic 8", "Topic 9"))
-
-# k7
-
-prep_k7 \<- estimateEffect(1:7 \~ cld2, stm_k7, meta = prep\$meta, uncertainty = "Global")
-
-summary(prep_k7)
-
-plot(prep_k7, covariate = "cld2", topics = c(1:7), model = stm_k7, method = "difference", cov.value1 = "de", cov.value2 = "ru", xlab = "More German-language posts ← Difference in Topic Prevalence → More Russian-language posts", main = "Effect of Region on Topic Prevalence", #xlim = c(-0.1, 0.1), labeltype = "custom", custom.labels = c("Topic 1", "Topic 2", "Topic 3", "Topic 4", "Topic 5", "Topic 6", "Topic 7"))
-
-# k8
-
-prep_k8 \<- estimateEffect(1:8 \~ cld2, stm_k8, meta = prep\$meta, uncertainty = "Global")
-
-summary(prep_k8)
-
-plot(prep_k8, covariate = "cld2", topics = c(1:8), model = stm_k8, method = "difference", cov.value1 = "de", cov.value2 = "ru", xlab = "More German-language posts ← Difference in Topic Prevalence → More Russian-language posts", main = "Effect of Region on Topic Prevalence", #xlim = c(-0.1, 0.1), labeltype = "custom", custom.labels = c("Topic 1", "Topic 2", "Topic 3", "Topic 4", "Topic 5", "Topic 6", "Topic 7", "Topic 8"))
-
-# k10
-
-# prep_k10 \<- estimateEffect(1:10 \~ cld2,
-
-# stm_k10,
-
-# meta = prep\$meta,
-
-# uncertainty = "Global")
-
-# 
-
-# summary(prep_k10)
-
-# 
-
-# 
-
-# 
-
-# plot(prep_k10,
-
-# covariate = "cld2",
-
-# topics = c(1:10),
-
-# model = stm_k10,
-
-# method = "difference",
-
-# cov.value1 = "de",
-
-# cov.value2 = "ru",
-
-# xlab = "More German-language posts ← Difference in Topic Prevalence → More Russian-language posts",
-
-# main = "Effect of Region on Topic Prevalence",
-
-# #xlim = c(-0.1, 0.1),
-
-# labeltype = "custom",
-
-# custom.labels = c("Topic 1", "Topic 2", "Topic 3", "Topic 4", "Topic 5", "Topic 6", "Topic 7", "Topic 8", "Topic 9", "Topic 10"))
-
-# 
-
-# \`\`\`
