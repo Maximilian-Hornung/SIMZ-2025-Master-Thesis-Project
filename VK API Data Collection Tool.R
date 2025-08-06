@@ -7,6 +7,9 @@ library(tidyverse)
 
 # Load Custom Functions ####
 
+
+# this function retrieves the user's VK wall with posts and post attachments
+
 wall_get <- function(user_id, access_token, count){
   
   
@@ -57,6 +60,8 @@ wall_get <- function(user_id, access_token, count){
 }
 
 
+# this function retrieves the user's profile information
+
 users_get <- function(user_ids, access_token, fields = NULL){
   
   # Check if fields is provided; if not, use a default value
@@ -94,7 +99,7 @@ users_get <- function(user_ids, access_token, fields = NULL){
     select(-any_of("temp"))
   
   
-  ##iterate through the main list structure
+  #iterate through the main list structure
   df <- resp$response |> 
     map(unlist) |>
     map_if(is.null, as.character) |>
@@ -112,6 +117,8 @@ users_get <- function(user_ids, access_token, fields = NULL){
 }
 
 
+
+# this function retrieves the user's mutual friends from his/her friend-list
 friends_get <- function(user_id, access_token, n_user, alters_df = FALSE, degree_1.5 = FALSE){
 
   all_friends <- list()
@@ -202,6 +209,8 @@ friends_get <- function(user_id, access_token, n_user, alters_df = FALSE, degree
 }
 
 
+# this function retrieves the friends among the user's friends (alters)
+
 
 alters_get <- function(df, method, access_token = access_token, n_user, degree_1.5 = FALSE) { 
   
@@ -236,6 +245,8 @@ alters_get <- function(df, method, access_token = access_token, n_user, degree_1
   
 }
 
+# core function combineing the above
+## this function construct the 1.5 degree egocentric network with a wall post df and a user information df
 
 ego_network_get <- function(user_id, access_token = access_token, method = friends_get, n_user, degree_1.5, wall_count, save_as_RDS){
 
@@ -339,11 +350,11 @@ wall_count <- 100 # how many user posts are being scraped (note: the API method 
 
 ego_network_get(user_id = user_id, access_token = access_token, n_user = n_user, degree_1.5 = TRUE, wall_count = wall_count, save_as_RDS = TRUE) 
  
-# create a list a loop through it
+# create a list of user ids to loop through and collect their data 
 
 user_list <- list("")
 
-
+# run the core function
 users_ego_network <- lapply(user_list_6, function(user) {
   ego_network_get(user_id = user, access_token = access_token, 
                   n_user = n_user, degree_1.5 = TRUE, 
