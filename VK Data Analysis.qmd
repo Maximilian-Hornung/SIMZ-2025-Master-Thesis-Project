@@ -1,5 +1,5 @@
 ---
-title: "Master Thesis Data Analysis"
+title: "Bridging Narrative and Language Divide Online? Networked Languages, Soft-Power, and Language Brokering on Russian Social Media"
 format: pdf
 editor: visual
 editor_options: 
@@ -14,7 +14,6 @@ editor_options:
 #| echo: false
 
 # load libraries
-
 library(tidyverse)
 library(igraph)
 library(ggraph)
@@ -36,57 +35,63 @@ library(qdapRegex)
 install.packages("devtools")
 devtools::install_github("zumbov2/deeplr")
 library(deeplr)
-library("tm")
+library(stm)
+library(tm)
+library(wordcloud)
+library(irr)
+library(qdapRegex)
 
 # set wd
-setwd("C:/Users/hornu/OneDrive/Master Social Scientific Data Analysis/Courses/SIMZ-2025 - Master Thesis Course/20250206 Spring Thesis Work/VK Network Data")
+setwd("")
 
 
 # load data
 ego_network_list <- readRDS("ego_network_list.rds")
 
-# save data
-#saveRDS(ego_network_list, file = "ego_network_list.rds")
 ```
 
 # Methodology: Data Cleaning and Preparation
 
-```{r load custom functions for data wrangling}
-
+```{r load custom function for data wrangling}
 
 ## create language labeling function #####
 get_language_labels <- function(ego_network_list) {
-  
+
   # function to clean text
-clean_text <- function(text, emoji_regex) {
-  text |>
-    str_remove_all("\\[#alias\\|.*?\\|.*?\\]") |>          # [#alias|link|url]
-    str_remove_all("\\[.*?\\|.*?\\]") |>                   # [id123|Name]
-    str_remove_all("\\[.*?\\]") |>                         # [alias]
-    str_remove_all("@\\w+") |>                             # mentions
-    str_remove_all("#\\S+") |>                             # hashtags
-    str_remove_all("http[s]?://\\S+") |>                   # URLs
-    str_remove_all("vk\\.cc/\\S+") |>                      # VK shortlinks
-    str_remove_all(emoji_regex) |>                         # emojis
-    rm_emoticon() |>                                       # emoticons
-    str_replace_all("\\\\", "") |>                         # backslashes
-    str_remove_all("<[^>]+>") |>                           # HTML tags
-    str_replace_all("[\t\r\n]", " ") |>                    # tabs/newlines
-    str_remove_all("\\([^\\)]*\\)|\\[[^\\]]*\\]") |>       # junk brackets/parentheses
-    str_remove_all("[!\\-:]{2,}|[:;]{1,2}\\S*") |>          # broken encodings
-    str_replace_all("%[A-Fa-f0-9]{2}", "") |>              # URL-encoded garbage
-   # str_replace_all("[^\\x20-\\x7Eа-яА-ЯёЁäöüÄÖÜßẞ\\p{L}\\p{N}\\s]", "") |>  
-    str_replace_all("\\s+", " ") |>                        # collapse spaces
-    str_squish()                                           # trim ends
-}
+  clean_text <- function(text, emoji_regex) {
+    text |>
+      str_remove_all("\\[#alias\\|.*?\\|.*?\\]") |>
+      str_remove_all("\\[.*?\\|.*?\\]") |>
+      str_remove_all("\\[.*?\\]") |>
+      str_remove_all("@\\w+") |>
+      str_remove_all("#\\S+") |>
+      str_remove_all("http[s]?://\\S+") |>
+      str_remove_all("vk\\.cc/\\S+") |>
+      str_remove_all(emoji_regex) |>
+      rm_emoticon() |>
+      str_replace_all("\\\\", "") |>
+      str_remove_all("<[^>]+>") |>
+      str_replace_all("[\t\r\n]", " ") |>
+      str_remove_all("\\([^\\)]*\\)|\\[[^\\]]*\\]") |>
+      str_remove_all("[!\\-:]{2,}|[:;]{1,2}\\S*") |>
+      str_replace_all("%[A-Fa-f0-9]{2}", "") |>
+      str_replace_all("\\s+", " ") |>
+      str_squish()
+  }
 
-
-  
-  # 1.5-degree edge list
+  # Get ego id
   ego_id <- ego_network_list[["attr_list"]] |>
     filter(is_ego == 1) |>
     pull(to)
 
+  # Edge list including ego
+  edge_list_with_ego <- ego_network_list[["edge_list"]] |>
+    filter(if_any(matches("deactivated"), ~is.na(.))) |>
+    select(from, to) |>
+    filter(!is.na(from) & !is.na(to) & from != to) |>
+    distinct()
+
+  # Edge list excluding ego
   edge_list_1.5_degree <- ego_network_list[["edge_list"]] |>
     left_join(ego_network_list[["attr_list"]], by = "to") |>
     filter(from != ego_id) |>
@@ -178,7 +183,8 @@ clean_text <- function(text, emoji_regex) {
         TRUE ~ lang
       )
     ) |>
-    mutate(to = user_id) 
+    mutate(to = user_id) |>
+    distinct(to, .keep_all = TRUE)
 
   # Final attribute list
   attr_list <- ego_network_list[["attr_list"]] |>
@@ -191,67 +197,13 @@ clean_text <- function(text, emoji_regex) {
     )
 
   return(list(
+    edge_list_with_ego = edge_list_with_ego,
     edge_list_1.5_degree = edge_list_1.5_degree,
     attr_list = attr_list,
-    wall_posts_labeled = wall_posts_lang_label
+    wall_posts_labeled = wall_posts_labeled
   ))
 }
 
-
-
-get_igraph <-  function(network_labeled, simplify = TRUE, largest_component = TRUE) {
-  
-edge_list_1.5_degree <- network_labeled[["edge_list_1.5_degree"]]
-attr_list <- network_labeled[["attr_list"]]
-  
-# create the graph from the edge list 
-g <- graph_from_data_frame(edge_list_1.5_degree, directed = FALSE)
-
-# assign node attributes
-V(g)$language <- attr_list[match(V(g)$name,attr_list$to),]$lang
-V(g)$sex <- attr_list[match(V(g)$name,attr_list$to),]$sex
-V(g)$time_absent <- attr_list[match(V(g)$name,attr_list$to),]$time_absent
-betweenness_centrality <- igraph::betweenness(g, directed = FALSE,  weights = NULL,  normalized = TRUE)
-V(g)$betweenness <- betweenness_centrality
-degree_centrality <- igraph::degree(g, normalized = TRUE)
-V(g)$degree <- degree_centrality
-closeness_centrality <- igraph::closeness(g, normalized = TRUE)
-V(g)$closeness <- closeness_centrality
-
-if(simplify == T){
- g <- simplify(
-  g,
-  remove.multiple = TRUE,
-  remove.loops = TRUE,
-  edge.attr.comb = igraph_opt("edge.attr.comb")
-)
-
- }
-
-
-# keep only largest component 
-  if(largest_component == TRUE){
-# Number of connected components
-scc <- igraph::components(g)
-num_scc <- scc$no
-
-no_max_scc <- max(scc$csize) # largest one
-no_min_scc <- min(scc$csize) # smallest one
-
-scc$csize[scc$csize > 1] # only components that have more than 1 member
-
-# Get largest connected component
-largest_component <- which.max(scc$csize)  
-
-# Create a subgraph containing only the largest connected component
-g <- induced_subgraph(g, which(scc$membership == largest_component))
-
-cat(glue("For the Language-core network, we observe {num_scc} connected components, of which the largest one contains {no_max_scc} nodes, and the smallest one {no_min_scc}.\n"))
-}
-
-return(g)
-
-}
 
 ```
 
@@ -349,40 +301,6 @@ print(langs_summary)
 
 ```{r validate language labels}
 
-
-## manually code network graph 48
-# initialize an empty df with user ids
-attr_df <- networks_labeled[[48]]$attr_list |> 
-  select(to) |> 
-  arrange(to) |> 
-  mutate(lang_manual = NA_character_)  # placeholder for manual input
-
-# create the df with the information for labeling
-wall_posts_df_unlabeled <- networks_labeled[[48]]$wall_posts_labeled |>                
-  select(user_id, post_text, attachment_text, Language1, Language2, country.title) |> 
-  arrange(user_id)
-  
-
-# attr_df <- edit(attr_df) # manually code
-
-# write.csv(attr_df, "manual_lang_labels_network_48.csv", row.names = FALSE) # save manually coded df
-attr_df <- read.csv("manual_lang_labels_network_48.csv", stringsAsFactors = FALSE) |> 
-  mutate(to = as.character(to))
-
-# see how many labels match
-attr_df_comparison <- networks_labeled[[48]]$attr_list |> 
-  select(to, lang) |> 
-  left_join(attr_df, by = "to") |> 
-  summarise(correct_labels = sum(lang == lang_manual),
-            n_labels = n(), 
-            percentage_correct = round((correct_labels/n_labels)*100), 1)
-
-cat(glue("Comparing the manually coded language labels with the labels of the language label function, we observe that out of {attr_df_comparison[1, 2]} users the language labeling function correctly coded {attr_df_comparison[1, 1]} ({attr_df_comparison[1, 3]}%) of the users' language repertoire."))
-
-
-
-
-
 set.seed(123) 
 
 # Extract and bind all attribute lists
@@ -416,27 +334,35 @@ wall_posts_df_unlabeled <- networks_labeled |>
 
 # attr_df_manual<- edit(attr_df_manual) # manually code
 # write.csv(attr_df_manual, "manual_lang_labels_200_random.csv", row.names = FALSE) # save manually coded df
-attr_df <- read.csv("manual_lang_labels_200_random.csv", stringsAsFactors = FALSE) |> 
-  mutate(to = as.character(to))
+attr_df_manual <- read_csv("manual_lang_labels_100_random.csv", col_names = FALSE) |>
+  separate(
+    col = 1,
+    into = c("network_id", "user_id", "lang_manual"),
+    sep = ",",
+    extra = "merge"
+  ) |>
+  mutate(across(everything(), ~ gsub('"', '', .))) |> 
+  mutate(
+    user_id = trimws(as.character(user_id)),  # remove whitespaces
+    network_id = trimws(network_id),
+    lang_manual = trimws(lang_manual)
+  ) |>
+  slice(-1)
 
 
-
-#combine manually coded with automatically coded
-attr_df_combined <- sampled_users |> 
-  arrange(to) |> 
-  select(network_id,user_id = to, lang) |> 
-  left_join(attr_df_manual, by = "user_id") |> 
-    slice_head(n = 100) |>
+attr_df_combined <- attr_df_manual |> 
+  mutate(user_id = as.character(user_id)) |>  # ensure type matches
+  left_join(
+    unique_users |> mutate(to = as.character(to)) |> select(user_id = to, lang),
+    by = "user_id"
+  ) |>
   select(lang, lang_manual)
-  
+
 
 
 # calculate Intercoder Reliability
-  
-library(irr)
 kappa_result <- kappa2(attr_df_combined, weight = "unweighted")
-
-
+print(kappa_result)
 ```
 
 # Study 1: Social Network Analysis
@@ -446,68 +372,89 @@ kappa_result <- kappa2(attr_df_combined, weight = "unweighted")
 #| warning: false
 #| echo: false
 
+# Analytical Strategy: Only keep largest component/ compute centrality value on full ego network, normalize them with z-score
+get_igraph <- function(network_labeled, simplify = TRUE, largest_component = TRUE) {
 
-## graph plotting function ####
-
-ggraph_get <- function(g){
+  # Prepare edge lists
+  edge_list_with_ego <- network_labeled[["edge_list_with_ego"]] 
+  edge_list_1.5_degree <- network_labeled[["edge_list_1.5_degree"]] 
+  attr_list <- network_labeled[["attr_list"]]
   
-set.seed(126)
-# Define color scheme once, with names matching levels
-lang_colors <- c(
-  "Bilingual" = "forestgreen",
-  "German" = "royalblue",
-  "Russian" = "firebrick",
-  "Other" = "darkviolet",
-  "Unknown" = "grey60"
-)
+  # Create igraph objects
+  g_ego <- igraph::graph_from_data_frame(edge_list_with_ego, directed = FALSE)
+  g <- igraph::graph_from_data_frame(edge_list_1.5_degree, directed = FALSE)
 
-# Generate the plot
-ggraph_plot <- ggraph(g, layout = 'fr') +
-  geom_edge_link(color = "grey80", alpha = 0.6) +
-  geom_node_point(
-    aes(color = language, size = betweenness),
-    show.legend = TRUE
-  ) +
-  scale_color_manual(
-    values = lang_colors,
-    name = "Language Repertoire",
-    drop = FALSE  # Ensures missing categories are still shown in the legend
-  ) +
-  scale_size_continuous(
-    name = "Betweenness Centrality",
-    range = c(1, 6)
-  ) +
-   theme_graph(background = 'white', legend.position="none") 
-  # annotate(
-  #   "text",
-  #   x = Inf,
-  #   y = -Inf,
-  #   label = "Data collected via VK API and visualized with ggraph ('fr' layout)",
-  #   hjust = 1.1,
-  #   vjust = -0.8,
-  #   size = 3,
-  #   color = "black",
-  #   fontface = "italic"
-  # ) +
-  # theme(
-  #   legend.position = "bottom",
-  #   legend.box = "vertical",
-  #   legend.title = element_text(size = 9),
-  #   legend.text = element_text(size = 8)
-  # )
-
-  # ggraph_plot <- ggraph_plot +
-  #  geom_node_text(aes(label = name), repel = TRUE, size = 2.5, color = "black")
+  # Calculate betweeness centralities on full ego network g_ego 
+  deg_ego <- igraph::degree(g_ego, normalized = TRUE)
 
 
-return(ggraph_plot)
+  # Name centralities for matching by vertex name
+  names(deg_ego) <-  igraph::V(g_ego)$name
+
+  # Map centralities to g vertices by name
+  deg_for_g <- deg_ego[igraph::V(g)$name]
+
+
+  # Assign raw centralities to g
+  igraph::V(g)$degree <- deg_for_g
+
+
+  # Assign other attributes from attr_list
+  idx <- match(igraph::V(g)$name, attr_list$to)
+  igraph::V(g)$language <- ifelse(is.na(idx), NA, attr_list$lang[idx])
+  igraph::V(g)$sex <- ifelse(is.na(idx), NA, attr_list$sex[idx])
+  igraph::V(g)$time_absent <- ifelse(is.na(idx), NA, attr_list$time_absent[idx])
+
+  # Simplify graph if requested
+  if (simplify) {
+    g <- igraph::simplify(
+      g,
+      remove.multiple = TRUE,
+      remove.loops = TRUE,
+      edge.attr.comb = igraph::igraph_opt("edge.attr.comb")
+    )
+  }
+
+  # Keep largest connected component if requested
+  if (largest_component) {
+    comps <- igraph::components(g)
+    largest_comp <- which.max(comps$csize)
+    g <- igraph::induced_subgraph(g, which(comps$membership == largest_comp))
+    
+    cat(glue::glue(
+      "For the Language-core network, we observe {comps$no} connected components, ",
+      "of which the largest contains {max(comps$csize)} nodes, and the smallest {min(comps$csize)}.\n"
+    ))
+  }
+
+  # compute z-scores only on nodes in filtered g
+  zscore <- function(x) {
+    m <- mean(x, na.rm = TRUE)
+    s <- sd(x, na.rm = TRUE)
+    (x - m) / s
+  }
+
+   igraph::V(g)$degree_z <- zscore(igraph::V(g)$degree)
+
+  
+  # BETWEENNESS & CLOSENESS ON FILTERED G
+  bet_ego <- igraph::betweenness(g, directed = FALSE, normalized = TRUE) #normalized betweenness
+  clo_ego <- igraph::closeness(g, normalized = TRUE)
+  igraph::V(g)$betweenness <- bet_ego
+  igraph::V(g)$closeness <- clo_ego
+
+  
+
+  return(g)
 }
 
 
 
-igraph <- lapply(networks_labeled, get_igraph) # convert to igraph
-ggraph <- lapply(igraph, ggraph_get) # convert to igraph
 
+
+igraph_list <- mapply(get_igraph, 
+                      network_labeled = networks_labeled, 
+                      simplify = TRUE) # convert to igraph
 
 ```
 
@@ -516,8 +463,83 @@ ggraph <- lapply(igraph, ggraph_get) # convert to igraph
 #| warning: false
 #| echo: false
 
+
+graph_plot <- function(igraph, seed = 126, show_legend = FALSE, title_text = NULL, net_type = FALSE) {
+  set.seed(seed)
+  windowsFonts(Times = windowsFont("Times New Roman"))  # Register Times New Roman as Times
+
+  lang_colors <- c(
+    "Bilingual" = "#66c2a5",   
+    "German"    = "#8da0cb",      
+    "Russian"   = "#fc8d62",     
+    "Other"     = "#e78ac3"       
+  )
+  
+  p <- ggraph(igraph, layout = 'fr') +
+    geom_edge_link(color = "grey80", alpha = 0.7, size = 1) +
+    geom_node_point(
+      aes(color = language, size = betweenness),
+      show.legend = c(size = FALSE, color = show_legend)  # hide betweenness legend
+    ) +
+    scale_size_continuous(range = c(4, 10)) +  # slightly bigger nodes
+    scale_color_manual(
+      values = lang_colors,
+      name = "User's Online Language Practice",
+      drop = FALSE
+    ) +
+    guides(
+      color = guide_legend(
+        override.aes = list(size = 6)  # bigger points in legend
+      )
+    ) +
+    theme_graph(background = 'white') +
+    theme(
+      text = element_text(family = "Times", face = "plain", size = 16),
+      legend.direction = "horizontal",
+      legend.key.size = unit(0.7, 'cm'),  # bigger legend key space
+      legend.title = element_text(family = "Times", size = 18),
+      legend.text = element_text(family = "Times", size = 18),
+      plot.margin = margin(10, 10, 10, 10)
+    )
+  
+  if (!is.null(title_text)) {
+    p <- p + 
+      geom_text(
+        aes(x = -Inf, y = Inf, label = title_text),
+        hjust = -0.1, vjust = 1.2,
+        size = 6.5, family = "Times", fontface = "plain",
+        inherit.aes = FALSE
+      )
+  }
+  
+  if (is.character(net_type) && nchar(net_type) > 0) {
+    p <- p +
+      geom_text(
+        aes(x = -Inf, y = Inf, label = net_type),
+        hjust = -0.1, vjust = 2.2,
+        size = 6.5, family = "Times", fontface = "plain",
+        inherit.aes = FALSE
+      )
+  }
+  
+  return(p)
+}
+
+
+# create list of plots for explorative visualization
+# plots_list <- igraph_list |> 
+#   imap(function(g, i) {
+#     graph_plot(
+#       igraph = g,
+#       seed = 126,
+#       show_legend = TRUE,
+#       title_text = paste("Network", i),
+#       net_type = attr(g, "network_type")
+#     )
+#   })
+
 # visualize all the network graphs  
-#walk(ggraph, print) 
+#walk(plots_list, print) 
 
 #multilingual_networks <- list(igraph[[2]], igraph[[4]], igraph[[5]], igraph[[6]], igraph[[7]], igraph[[8]], igraph[[9]],  igraph[[10]], igraph[[11]], igraph[[15]], igraph[[16]], igraph[[24]], igraph[[27]], igraph[[30]], igraph[[31]], igraph[[32]], igraph[[33]], igraph[[34]],  igraph[[35]], igraph[[36]], igraph[[38]], igraph[[40]], igraph[[43]],  igraph[[48]]) 
 ```
@@ -899,10 +921,13 @@ networks_labeled[[48]]$attr_list <- rows_update(
 # store multilingual and cleaned networks for ERGM modeling
 multilingual_networks_cleaned <- list(networks_labeled[[2]], networks_labeled[[5]], networks_labeled[[6]], networks_labeled[[7]], networks_labeled[[8]], networks_labeled[[9]], networks_labeled[[10]], networks_labeled[[11]], networks_labeled[[15]], networks_labeled[[16]], networks_labeled[[24]], networks_labeled[[27]], networks_labeled[[30]], networks_labeled[[31]], networks_labeled[[32]], networks_labeled[[34]],  networks_labeled[[35]], networks_labeled[[36]], networks_labeled[[38]], networks_labeled[[40]], networks_labeled[[48]])  
 
-igraph_clean <- lapply(multilingual_networks_cleaned, get_igraph) # convert to igraph
-ggraph_clean <- lapply(igraph_clean, function(x) {
-  graph_plot(x) + theme(legend.position = "none")
-}) # convert to ggraph
+
+igraph_clean <- mapply(get_igraph, 
+                      network_labeled= multilingual_networks_cleaned, 
+                      simplify = TRUE) # convert to igraph
+
+
+plots_list_clean <- lapply(igraph_clean, graph_plot)
 
 
 ```
@@ -913,7 +938,7 @@ ggraph_clean <- lapply(igraph_clean, function(x) {
 #| echo: false
 
 # visualize all the cleaned network graphs  
-walk(ggraph_clean, print)
+walk(plots_list_clean, print)
 
 # classify them 
 
@@ -927,182 +952,38 @@ names(igraph_named) <- network_types
 
 ```{r network classification and visulaization I}
 
-# Custom graph plotting function
-graph_plot <- function(igraph, seed = 126, show_legend = FALSE) {
-  
-  set.seed(seed)
+ windowsFonts(Times = windowsFont("Times New Roman")) # set fonds 
 
-lang_colors <- c(
-  "Bilingual" = "#66c2a5",   
-  "German" = "#8da0cb",      
-  "Russian" ="#fc8d62",     
-  "Other" = "#e78ac3",      
-  "Unknown" = "#a6d854"      
-)
+# generate plots for typical networks types:
+gatekeeper <- graph_plot(igraph_clean[[9]], seed = 132, title_text = "1. Gatekeeper")
+bridge <- graph_plot(igraph_clean[[21]], seed = 138, title_text = "2. Language Bridge")
+peripheral <- graph_plot(igraph_clean[[2]], seed = 289, title_text = "3. Peripheral Language")
+union <- graph_plot(igraph_clean[[14]], seed = 132, title_text = "4. Union")
+integration <- graph_plot(igraph_clean[[5]], seed = 120, show_legend = TRUE, title_text = "5. Integration")
 
-  ggraph(igraph, layout = 'fr') +
-    geom_edge_link(color = "grey80", alpha = 0.7, size = 1) +
-    geom_node_point(
-      aes(color = language),
-      show.legend = show_legend,
-      size = 7
-    ) +
-    scale_color_manual(
-      values = lang_colors,
-      name = "User's Online Language Practice",
-      drop = FALSE
-    ) +
-    theme_graph(background = 'white') +
-    theme(
-      text = element_text(family = "Times", face = "plain", size = 16),
-      legend.direction = "horizontal",
-      legend.key.size = unit(0.5, 'cm'),
-      legend.title = element_text(size = 18),
-      legend.text = element_text(size = 18),
-      plot.margin = margin(5, 5, 5, 5)
-    )  
-}
-
-# Make plots (no density inside the plots)
-gatekeeper <- graph_plot(igraph_clean[[9]], seed = 132) +  
-  annotate("text", x = -Inf, y = Inf, label = "1. Gatekeeper",
-           hjust = -0.1, vjust = 2, size = 6.5, family = "Times", face = "plain")
-
-bridge <- graph_plot(igraph_clean[[21]], seed = 138) +  
-  annotate("text", x = -Inf, y = Inf, label = "2. Language Bridge",
-           hjust = -0.1, vjust = 2, size = 6.5, family = "Times", face = "plain")
-
-peripheral <- graph_plot(igraph_clean[[2]], seed = 289) +  
-  annotate("text", x = -Inf, y = Inf, label = "3. Peripheral Language",
-           hjust = -0.1, vjust = 2, size = 6.5, family = "Times", face = "plain")
-
-union <- graph_plot(igraph_clean[[14]], , seed = 132) +  
-  annotate("text", x = -Inf, y = Inf, label = "4. Union",
-           hjust = -0.1, vjust = 2, size = 6.5, family = "Times", face = "plain")
-
-integration <- graph_plot(igraph_clean[[5]], seed = 120, show_legend = TRUE) +  
-  annotate("text", x = -Inf, y = Inf, label = "5. Integration",
-           hjust = -0.1, vjust = 2, size = 6.5, family = "Times", face = "plain")
-
-
-
-# Collect densities
-densities <- glue(
-  "Gatekeeper: {round(cross_border_density(igraph_clean[[9]], Bilinguals.include = FALSE), 3)}   | ",
-  "Language Bridge: {round(cross_border_density(igraph_clean[[21]], Bilinguals.include = FALSE), 3)}   | ",
-  "Peripheral Language: {round(cross_border_density(igraph_clean[[2]], Bilinguals.include = FALSE), 3)}   | ",
-  "Union: {round(cross_border_density(igraph_clean[[14]], Bilinguals.include = FALSE), 3)}   | ",
-  "Integration: {round(cross_border_density(igraph_clean[[5]], Bilinguals.include = FALSE), 3)}"
-)
-
-# Combine plots
+# Combine plots in 2 rows: 3 plots on top, 2 on bottom, with shared legend below
 final_plot <- (gatekeeper + bridge + peripheral) / (union + integration) +
   plot_layout(guides = "collect") &
   theme(legend.position = "bottom")
 
-# Add density text above the legend
-final_plot <- final_plot + 
-  plot_annotation(
-    caption = densities,
-    theme = theme(
-      plot.caption = element_text(
-        family = "Times", face = "italic", size = 16, hjust = 0.5,
-        margin = margin(b = 10, t = 10)
-      )
-    )
-  )
-
-# Display
 final_plot
 
 ```
 
 ```{r network classification and visulaization II}
 
-graph_plot_appendix <- function(igraph, net_type, seed = 126, show_legend = TRUE, annotate_density_below = FALSE) {
-  
-  cross_border_denisty <- round(cross_border_density(igraph, Bilinguals.include = FALSE), 3)
 
-  windowsFonts(Times = windowsFont("Times New Roman"))
-  set.seed(seed)
+# Iterate over network list for network visualization in appendix 
 
-lang_colors <- c(
-  "Bilingual" = "#66c2a5",   
-  "German" = "#8da0cb",      
-  "Russian" ="#fc8d62",     
-  "Other" = "#e78ac3",      
-  "Unknown" = "#a6d854"     
+plots_list_appendix <- purrr::map2(
+  igraph_clean,
+  network_types,
+  ~ graph_plot(.x, seed = 126, show_legend = FALSE, net_type = .y)
 )
 
-  ggraph_plot <- ggraph(igraph, layout = 'fr') +
-    geom_edge_link(color = "grey80", alpha = 0.9, size = 10) +
-    geom_node_point(
-      aes(color = language),
-      show.legend = show_legend,
-      size = 5.3
-    ) +
-    scale_color_manual(
-      values = lang_colors,
-      name = "User's Online Language Practice",
-      drop = FALSE
-    ) +
-    theme_graph(background = 'white') +
-    theme(
-      text = element_text(family = "Times", face = "plain", size = 12),
-      legend.position = "bottom",  
-      legend.direction = "horizontal",
-      legend.key.size = unit(0.5, 'cm'),
-      legend.key.height = unit(0.5, 'cm'),
-      legend.key.width = unit(0.5, 'cm'),
-      legend.title = element_text(size = 14),
-      legend.text = element_text(size = 12)
-    ) +
-    annotate(
-      "text",
-      x = -Inf, y = Inf,
-      label = net_type,
-      hjust = -0.1, vjust = 2,
-      size = 6,
-      family = "Times",
-      face = "bold"
-    )
-  
-  # Add density annotation below, if requested
-  if (annotate_density_below) {
-    ggraph_plot <- ggraph_plot +
-      annotate(
-        "text",
-        x = 0, y = -Inf,
-        label = glue("Cross-border density: {cross_border_denisty}"),
-        vjust = -1,
-        size = 5.3,
-        family = "Times",
-        face = "italic"
-      )
-  } else {
-    ggraph_plot <- ggraph_plot +
-      annotate(
-        "text",
-        x = -Inf, y = Inf,
-        hjust = -1.2, vjust = 43.2,
-        size = 3.3,
-        color = "black",
-        label = glue("Cross-border density: {cross_border_denisty}"),
-        family = "Times",
-        face = "italic"
-      )
-  }
+# plot singular networks and ass them into the appendix 
+plots_list_appendix[[17]]
 
-  return(ggraph_plot)
-}
-
-
-plots_list_appendix <- purrr::map2(igraph_clean, network_types, ~ graph_plot_appendix(.x, .y, show_legend = FALSE, annotate_density_below = TRUE))
-
-
-plots_list_appendix[[18]]
-
-graph_plot_appendix(igraph_clean[[18]],network_types[18], show_legend = FALSE, seed = 200,  annotate_density_below = TRUE)
 ```
 
 ```{r network descriptives}
@@ -1127,7 +1008,7 @@ get_selected_network_stats <- function(g) {
     number_nodes = round(vcount(g), 1),
     number_edges = round(ecount(g), 1),
     density = round(igraph::edge_density(g), 3),
-    cross_border_density = round(cross_border_density(g), 3),
+    #cross_border_density = round(cross_border_density(g), 3),
     transitivity = round(igraph::transitivity(g), 3),
     russian_percentage = round(russian_prop, 1),
     german_percentage = round(german_prop, 1),
@@ -1143,7 +1024,7 @@ network_stats_names <- c(
   "number_nodes" = "Number of Nodes",
   "number_edges" = "Number of Edges",
   "density" = "Density",
-  "cross_border_density" = "Cross-Border Density",
+  #"cross_border_density" = "Cross-Border Density",
   "transitivity" = "Transitivity",
   "russian_percentage" = "Russian Speakers (%)",
   "german_percentage" = "German Speakers (%)",
@@ -1240,20 +1121,20 @@ stats_table |>
   ) |>
   tab_row_group(
     label = md("**Network-Level Statistics**"),
-    rows = 1:5
+    rows = 1:4
   ) |>
   tab_row_group(
     label = md("**Attribute-level Descriptives**"),
-    rows = 6:9
+    rows = 5:8
   ) |>
-  tab_spanner(
-    label = "Structural Hole Spanning Types",
-    columns = c("Gatekeeper", "Bridge")
-  ) |>
-  tab_spanner(
-    label = "Integrated Network Types",
-    columns = c("Peripheral", "Union", "Integration")
-  ) |>
+  # tab_spanner(
+  #   label = "Structural Hole Spanning Types",
+  #   columns = c("Gatekeeper", "Bridge")
+  # ) |>
+  # tab_spanner(
+  #   label = "Integrated Network Types",
+  #   columns = c("Peripheral", "Union", "Integration")
+  # ) |>
   cols_label(
     Gatekeeper = "Gatekeeper (4)",
     Bridge = "Lang. Bridge (1)",
@@ -1273,6 +1154,43 @@ stats_table |>
 
 ```
 
+```{r Betweenness Centrality and Hypothesis 1}
+#| message: false
+#| warning: false
+#| echo: false
+
+# functions to extract betweenness centrality of user subset
+Betweenness_Bilinguals_get  <- function(igraph){
+
+# Extract Bilingual users and calculate Betweeness
+Bilinguals <- V(igraph)$name[which(V(igraph)$language == "Bilingual")]
+Bilinguals_betweenness <-  igraph::betweenness(igraph, directed = FALSE, v = Bilinguals)
+
+return(Bilinguals_betweenness)
+}
+
+Betweenness_Monolinguals_get  <- function(igraph){
+# Extract Monolingual users and calculate Betweeness
+Monolinguals <- V(igraph)$name[which(V(igraph)$language %in% c("Russian", "German", "Other"))]
+Monolinguals_betweenness <-  igraph::betweenness(igraph, directed = FALSE, v = Monolinguals)
+
+return(Monolinguals_betweenness)
+}
+
+
+Betweenness_Bilinguals_mean <- lapply(igraph_clean, Betweenness_Bilinguals_get) |>
+  unlist() |> 
+  mean(na.rm = TRUE)
+
+print(Betweenness_Bilinguals_mean)
+
+Betweenness_Monolinguals_mean <- lapply(igraph_clean, Betweenness_Monolinguals_get) |>
+  unlist() |> 
+  mean(na.rm = TRUE)
+
+print(Betweenness_Monolinguals_mean)
+```
+
 # Study 2: Exponential Random Graph Analysis
 
 ```{r ERGM}
@@ -1288,8 +1206,6 @@ net <- lapply(igraph_clean, asNetwork)
 # 1.	A full model, which includes all terms (sociality, language-based selective mixing, degree assortativity, popularity, and triadic closure).
 # 2.	A non-closure model (NC), which excludes triadic closure from the full model; and
 # 3.	A language mixing model (LM), which includes only language-based selective mixing.
-
-
 
 
 ```
@@ -1310,10 +1226,10 @@ for (i in seq_along(net)) {
     ergm(
       net[[i]] ~ edges + 
         nodemix("language") +  
-        absdiff("degree") + 
-        nodecov("degree") +  
+        absdiff("degree_z") + 
+        nodecov("degree_z") +
         gwesp(1.3, fixed = TRUE),
-      control = control.ergm(seed = 120)
+      control = control.ergm(seed = 121)
     ),
     error = function(e) {
       message("Error in model ", i, ": ", conditionMessage(e))
@@ -1327,7 +1243,7 @@ for (i in seq_along(net)) {
 
 
 # load data
-#full_model_results <- readRDS("full_model_results.rds")
+full_model_results <- readRDS("full_model_results.rds")
 
 
 
@@ -1336,7 +1252,6 @@ for (i in seq_along(full_model_results)) {
   names(full_model_results)[[i]] <- paste0("network ", i)
   
 }
-
 
 
 ```
@@ -1352,8 +1267,11 @@ non_closure_model_results <- vector("list", length(net))
 for (i in seq_along(net)) {
   message("Running model ", i, " of ", length(net))
   result <- tryCatch(
-    ergm(net[[i]] ~ edges + nodemix("language") + absdiff("degree") + nodecov("degree"),           
-         control = control.ergm(seed = 120)),
+    ergm(net[[i]] ~ edges + 
+        nodemix("language") +  
+        absdiff("degree_z") + 
+        nodecov("degree_z"),           
+         control = control.ergm(seed = 121)),
     error = function(e) {
       message("Error in model ", i, ": ", conditionMessage(e))
       return(NA)
@@ -1366,7 +1284,7 @@ for (i in seq_along(net)) {
 
 
 # load data
-# non_closure_model_results <- readRDS("non_closure_model_results")
+non_closure_model_results <- readRDS("non_closure_model_results.rds")
 
 
 # give them a unique index based on their network number 
@@ -1390,7 +1308,7 @@ for (i in seq_along(net)) {
   message("Running model ", i, " of ", length(net))
   result <- tryCatch(
     ergm(net[[i]] ~ edges + nodemix("language"),           
-         control = control.ergm(seed = 120)),
+         control = control.ergm(seed = 121)),
     error = function(e) {
       message("Error in model ", i, ": ", conditionMessage(e))
       return(NA)
@@ -1403,7 +1321,7 @@ for (i in seq_along(net)) {
 
 
 # load data
-# language_mixing_model_results <- readRDS("language_mixing_model_results.rds")
+language_mixing_model_results <- readRDS("language_mixing_model_results.rds")
 
 
 # give them a unique index based on their network number 
@@ -1419,8 +1337,6 @@ for (i in seq_along(language_mixing_model_results)) {
 #| message: false
 #| warning: false
 #| echo: false
-
-library(lmtest)
 
 
 # Create a list of model lists and their names
@@ -1521,6 +1437,7 @@ min_AIC <- AIC_df |>
 
 # Create data summary 
 
+
 full_model_summary <- full_model_results  |>
   imap(~ tidy(.x) 
        |> mutate(model = .y)) |>  # adds model index
@@ -1540,8 +1457,8 @@ full_model_summary <- full_model_results  |>
                       "mix.language.Bilingual.Other" ~ "Bilingual:Other",
                       "mix.language.German.Other" ~ "German:Other",
                       "mix.language.Other.Other" ~ "Other:Other",
-                      "nodecov.degree" ~ "Popularity",
-                      "absdiff.degree" ~ "Degree Assortativity",
+                      "nodecov.degree_z" ~ "Popularity",
+                      "absdiff.degree_z" ~ "Degree Assortativity",
                       "gwesp.fixed.1.3" ~ "Triadic Closure"
                       ),
     group = str_extract(term, "mix|nodecov|absdiff|gwesp"),
@@ -1555,10 +1472,11 @@ full_model_summary <- full_model_results  |>
     mid =  exp_estimate,
     low = exp(estimate - 1.96 * std.error),
     high = exp(estimate + 1.96 * std.error), 
-    network_type_cat = if_else(model %in% c("network 1", "network 7", "network 8", "network 9", "network 21"), "Structural Hole Spanners", "Integrated Networks")
+    network_type_cat = if_else(model %in% c("network 1", "network 7", "network 8", "network 9"), "Structural Hole Spanners", "Integrated Networks")
   )
 
 # Create boxplot
+theme_minimal(base_family = "Times New Roman", base_size = 14)
 
 full_model_summary |> 
   filter(coef != "Intercept") |> 
@@ -1579,7 +1497,7 @@ full_model_summary |>
       "Integrated Networks" = "#8da0cb"        # blue
     )
   ) +
-  coord_cartesian(xlim = c(-6, 10)) +
+  coord_cartesian(xlim = c(-5, 6)) +
   theme_minimal(base_family = "Times New Roman") +
   theme(
     strip.placement = "outside",
@@ -1597,7 +1515,7 @@ full_model_summary |>
     y = "",
     x = "Conditional (log-)odds ratios",
     fill = "Network Type",  
-    caption = "Full Model coefficients plotted across all 21 multilingual networks divided by network categories. Reference Category is German:German. \n Source: Author's calculations applying ERGMs to VK network data."
+    caption = "Full Model coefficients plotted across all 21 multilingual networks divided by network categories.\n Reference Category is Bilingual:Bilingual and Degree-based selective mixing is normalized with z-scores. \n Source: Author's calculations applying ERGMs to VK network data."
   )
 
 ```
@@ -1632,7 +1550,7 @@ coef_summary_overall <- full_model_summary |>
   arrange(Variable) |> 
   select(Variable, Coefficients, `Signif. Coeff.`, Percentage, Median, IQR)
 
-# Prepare network/tzpe specific summary
+# Prepare network/type specific summary
 
 coef_summary_by_type <- full_model_summary |> 
   filter(!coef %in% c("Intercept")) |> 
@@ -1660,9 +1578,8 @@ coef_summary_by_type <- full_model_summary |>
   arrange(NetworkType, Variable) |> 
   select(NetworkType, Variable, Coefficients, `Signif. Coeff.`, Percentage, Median, IQR)
 
-# build GT tables
 
-# Overall table 
+# Overall table
 gt_overall <- coef_summary_overall |> 
   gt::gt() |> 
   tab_header(title = md("**Overall Network Summary**")) |> 
@@ -1687,14 +1604,30 @@ gt_overall <- coef_summary_overall |>
     footnote = "Interquartile Range (Q3 - Q1).",
     locations = cells_column_labels(columns = IQR)
   ) |> 
-  cols_align(align = "left", columns = "Variable")
+  cols_align(align = "left", columns = "Variable") |> 
+  tab_style(
+    style = cell_text(font = "Times New Roman"),
+    locations = cells_body(columns = everything())
+  ) |> 
+  tab_style(
+    style = cell_text(font = "Times New Roman"),
+    locations = cells_column_labels(columns = everything())
+  ) |> 
+  tab_style(
+    style = cell_text(font = "Times New Roman"),
+    locations = cells_title(groups = "title")
+  ) |> 
+  tab_style(
+    style = cell_text(font = "Times New Roman"),
+    locations = cells_row_groups()
+  )
 
-#  Network type–specific table 
+# Network-type-specific table
 gt_by_type <- coef_summary_by_type |> 
   mutate(row_id = row_number()) |> 
   select(-c(NetworkType, row_id)) |> 
   gt::gt() |> 
-  tab_header(title = md("**Network-Type-Specific Summary**")) |>
+  tab_header(title = md("**Network-Type-Specific Summary**")) |> 
   tab_row_group(
     label = md("*Integrated Network Types*"),
     rows = which(coef_summary_by_type$NetworkType == "Integrated Networks")
@@ -1703,7 +1636,24 @@ gt_by_type <- coef_summary_by_type |>
     label = md("*Structural Hole Types*"),
     rows = which(coef_summary_by_type$NetworkType == "Structural Hole Spanners")
   ) |> 
-  cols_align(align = "left", columns = "Variable")
+  cols_align(align = "left", columns = "Variable") |> 
+  tab_style(
+    style = cell_text(font = "Times New Roman"),
+    locations = cells_body(columns = everything())
+  ) |> 
+  tab_style(
+    style = cell_text(font = "Times New Roman"),
+    locations = cells_column_labels(columns = everything())
+  ) |> 
+  tab_style(
+    style = cell_text(font = "Times New Roman"),
+    locations = cells_title(groups = "title")
+  ) |> 
+  tab_style(
+    style = cell_text(font = "Times New Roman"),
+    locations = cells_row_groups()
+  )
+
 ```
 
 ```{r modelsummary table}
@@ -1811,17 +1761,21 @@ produce_ergm_summary_table <- function(i,
       "mix.language.Bilingual.Other" = "Bilingual:Other (Ref: Bilingual:Bilingual)",
       "mix.language.German.Other" = "German:Other (Ref: Bilingual:Bilingual)",
       "mix.language.Other.Other" = "Other:Other (Ref: Bilingual:Bilingual)",
-      "nodecov.degree" = "Popularity",
-      "absdiff.degree" = "Degree Assortativity",
+      "nodecov.degree_z" = "Popularity (normalized)",
+      "absdiff.degree_z" = "Degree Assortativity (normalized)",
       "gwesp.fixed.1.3" = "Triadic Closure"
     ),
-    stars = TRUE,
-    add_columns = tibble("% Change*" = coef_compare$perc_change),
-    gof_map = gof_map,
-    notes = "Estimates in conditional (log-)odds ratios. Standard Error in brackets. *Percentage change from NC to Full Model. Coefficients for “NA” category are not shown. Likelihood ratio tests are performed comparing each model to the model in the previous column, (i.e., LM to NC, and NC to Full). Source: Author's ERGM application to VK network data.",
-    fmt = 2,
-    title = glue::glue("Multilingual Network Number {i}")
-  )
+  stars = TRUE,
+  add_columns = tibble("% Change*" = ifelse(
+  is.na(coef_compare$perc_change),
+  "",
+  sprintf("%.1f", coef_compare$perc_change)
+)),
+  gof_map = gof_map,
+  notes = "Estimates in conditional (log-)odds ratios. Standard Error in brackets. *Percentage change from NC to Full Model. Coefficients for “NA” category are not shown. Likelihood ratio tests are performed comparing each model to the model in the previous column, (i.e., LM to NC, and NC to Full). I normalized degree-effects using z-scores. Source: Author's ERGM application to VK network data.",
+  fmt = 2,
+  title = glue::glue("Multilingual Network Number {i}")
+)
 }
 
 #loop thorugh the three lists with nested ERGms to produce summary tables
@@ -1841,105 +1795,8 @@ for (i in seq_along(full_model_results)) {
 ergm_tables |> 
   map(print)
 
-# print ergm table for network 14
+# print singular ergm table 
 ergm_tables[[5]]
-
-  
-```
-
-```{r percentage change across networks and network types}
-#| message: false
-#| warning: false
-#| echo: false
-
-calc_overall_mean_perc_change_sig <- function(language_mixing_list, non_closure_list, full_list, network_types) {
-  
-  all_changes <- tibble()
-
-  for (i in seq_along(full_list)) {
-    models_ergm <- list(
-      "LM Model" = language_mixing_list[[i]],
-      "NC Model" = non_closure_list[[i]],
-      "Full Model" = full_list[[i]]
-    )
-    
-    coefs_NC <- tidy(models_ergm[["NC Model"]])
-    coefs_Full <- tidy(models_ergm[["Full Model"]])
-    
-   # Uncomment to skip networks with insignificant triadic closure term
-    if(coefs_Full |> filter(term == "gwesp.fixed.1.3") |> pull(p.value) >= 0.05) next
-    
-    coef_changes <- coefs_NC |>
-      select(term, estimate_NC = estimate, p.value_NC = p.value) |>
-      left_join(
-        coefs_Full |> select(term, estimate_Full = estimate, p.value_Full = p.value),
-        by = "term"
-      ) |>
-      mutate(
-        perc_change = 100 * (estimate_Full - estimate_NC) / estimate_NC,
-        network_type = network_types[i],
-        network_id = i
-      ) |>
-      filter(
-        !is.na(perc_change),
-        term != "edges", 
-        p.value_NC < 0.05
-        # p.value_Full < 0.05 # optional if you want both sig
-      )
-    
-    all_changes <- bind_rows(all_changes, coef_changes)
-  }
-  
-  # Classify as structural hole or other
-  all_changes <- all_changes |> 
-    mutate(
-      type_group = case_when(
-        network_type %in% c("Gatekeeper", "Bridge") ~ "Structural Hole",
-        TRUE ~ "Other"
-      )
-    )
-  
-  # Overall mean % change (all coefficients across networks)
-  overall_mean <- all_changes |> 
-    summarise(overall_mean_perc_change = mean(perc_change, na.rm = TRUE)) |> 
-    pull()
-  
-  # Mean % change by type group (Structural Hole vs Other)
-  by_group_mean <- all_changes |> 
-    group_by(type_group) |> 
-    summarise(mean_perc_change = mean(perc_change, na.rm = TRUE), .groups = "drop")
-  
-  # Mean % change per coefficient (term) across all networks
-  mean_change_per_term <- all_changes |> 
-    group_by(term) |> 
-    summarise(mean_perc_change = mean(perc_change, na.rm = TRUE), .groups = "drop") |> 
-    arrange(desc(abs(mean_perc_change)))
-  
-  list(
-    overall_mean = overall_mean,
-    by_group_mean = by_group_mean,
-    mean_change_per_term = mean_change_per_term,
-    all_changes = all_changes
-  )
-}
-
-
-  
-network_types <- c(
-  "Gatekeeper", "Peripheral", "Integration", "Integration", "Union", 
-  "Integration", "Gatekeeper", "Gatekeeper", "Gatekeeper", "Peripheral", 
-  "Integration", "Integration", "Peripheral", "Union", "Integration", 
-  "Union", "Integration", "Peripheral", "Peripheral", "Peripheral", 
-  "Bridge"
-)
-
-results_diff <- calc_overall_mean_perc_change_sig(
-  language_mixing_model_results,
-  non_closure_model_results,
-  full_model_results,
-  network_types = network_types
-)
-
 
 
 ```
@@ -2051,9 +1908,6 @@ for (i in seq_along(full_model_results)) {
 
 
 
-
-
-
 ame_mediation_df_cleaned <- ame_mediation_df |> 
   filter(!is.na(Mediated_P) & !is.nan(Mediated_P)) |> 
   mutate(
@@ -2068,9 +1922,9 @@ ame_mediation_df_cleaned <- ame_mediation_df |>
                       "mix.language.Bilingual.Other" ~ "Bilingual:Other",
                       "mix.language.German.Other" ~ "German:Other",
                       "mix.language.Other.Other" ~ "Other:Other",
-                      "nodecov.degree" ~ "Popularity",
-                      "absdiff.degree" ~ "Degree Assortativity",
-                     "gwesp.fixed.1.3" ~ "Triadic Closure",
+                      "nodecov.degree_z" ~ "Popularity",
+                      "absdiff.degree_z" ~ "Degree Assortativity",
+                      "gwesp.fixed.1.3" ~ "Triadic Closure",
                       .default = term
                       ),
     group = str_extract(term, "mix|nodecov|absdiff|gwesp"),
@@ -2081,7 +1935,7 @@ ame_mediation_df_cleaned <- ame_mediation_df |>
                        "gwesp" ~ "Network Self-Organisation",
                        .default = "Other"
                        ),
-    network_type_cat = if_else(network_type %in% c("Gatekeeper", "Bridge"), "Structural Hole Spanners", "Integrated Networks")
+    network_type_cat = if_else(network_type == "Gatekeeper", "Structural Hole Spanners", "Integrated Networks")
   )  
 
 
@@ -2204,11 +2058,6 @@ gtTable_overall <- mediation_df_overall |>
   as_tibble()
 
 
-
-
-
-
-
 # Construct stratified GT Table
 gtTable <- mediation_df_summary |>  
   mutate(
@@ -2285,7 +2134,6 @@ gtTable <- mediation_df_summary |>
 
 
 
-
 # Grouping indices
 rows_integrated <- which(gtTable$network_type == "Integrated Networks")
 rows_structural <- which(gtTable$network_type == "Structural Hole Spanners")
@@ -2317,10 +2165,6 @@ gtTable |>
     Median_AME_Full = md("Median AME<br>(Full) ×10"),
     Median_Indirect = md("Median Indirect<br>Effect ×10"),
     Median_Pct_Change = md("Median %<br>Change")
-  ) |>  
-  tab_row_group(
-    label = md("*Overall Summary Across Networks*"),
-    rows = rows_overall
   ) |>  
   tab_row_group(
     label = md("*Integrated Network Types*"),
@@ -2364,8 +2208,6 @@ gtTable_overall |>
   tab_header(title = md("**Part I: Overall Network Summary**")) 
 
 
-
-
 ```
 
 ```{r Goodness of Fit I}
@@ -2387,8 +2229,15 @@ my_fit |>
 # dimensions.
 # NOTE that models for bigger networks and of gatekeeper type deviate from this trend  
 par(mfrow = c(2,2), family = "serif")
-plot(my_fit[[9]], main = '', family = "serif")
+plot(my_fit[[14]], main = '', family = "serif") #Union
 
+plot(my_fit[[9]], main = '', family = "serif") #Gatekeeper
+
+plot(my_fit[[2]], main = '', family = "serif") #Peripheral Language
+
+plot(my_fit[[5]], main = '', family = "serif") #Integration
+
+plot(my_fit[[21]], main = '', family = "serif") #Language Bridge
 
 
 ```
@@ -2400,7 +2249,7 @@ plot(my_fit[[9]], main = '', family = "serif")
 
 
 #  Markov Chain Monte Carlo diagnostics
-mcmc_diagnostics <- full_model_results_absdiff |> 
+mcmc_diagnostics <- full_model_results |> 
   map(mcmc.diagnostics) 
 # all models did properly converge 
 
@@ -2408,10 +2257,9 @@ mcmc_diagnostics <- full_model_results_absdiff |>
 
 # Study 3: Structural Topic Modeling
 
-
 ```{r Extend of Language Brokering between RU and DE users}
-# Answer the research question: To what extend?
 
+# get combined dataframe with all language posts
 user_wall_df_combined <- networks_labeled |> 
   map(\(x) x$wall_posts_labeled) |> 
   bind_rows()
@@ -2456,7 +2304,7 @@ n_post_brokered <- nrow(lang_brokered_df)
 post_brokered_reduction_pct <- (1 - (n_post_brokered / n_post_initially)) * 100
 user_brokered_reduction_pct <- (1 - (n_user_brokered / n_user_initially)) * 100
 
-cat(glue("Among the unique posts filtered for language-brokered posts:
+cat(glue("Among the posts filtered for language-brokered posts:
 - Posts reduced from {n_post_initially} to {n_post_brokered} ({round(post_brokered_reduction_pct, 2)}%)
 - Users reduced from {n_user_initially} to {n_user_brokered} ({round(user_brokered_reduction_pct, 2)}%)\n"))
 
@@ -2497,6 +2345,7 @@ lang_brokered_df |>
   )
 
 
+
 ```
 
 ```{r prepare post_text for maschine translation}
@@ -2528,7 +2377,7 @@ sum(duplicated(lang_brokered_filtered$post_text_clean))
 
 
 
-# count character -- before cleaning 
+# count characters 
 total_chars <- sum(nchar(lang_brokered_filtered$post_text_clean))
 
 
@@ -2588,13 +2437,15 @@ lang_brokered_EN <- lang_brokered_EN |>
     post_text_EN_clean = strip(post_text_EN_clean)
   )
 
- check_text <- textclean::check_text(lang_brokered_EN$post_text_EN_clean) # check again / looks good now 
+ #check_text <- textclean::check_text(lang_brokered_EN$post_text_EN_clean) # check again / looks good now
+
+# create df for brokered content to share 
+# lang_brokered_EN_publication <- lang_brokered_EN |> 
+#   select(post_text_EN, post_text_EN_clean, custom_id = id, post_date)
+#   saveRDS(lang_brokered_EN_publication, file = "lang_brokered_EN_publication.rds")
 ```
 
 ```{r Structural Topic Modeling}
-library(stm)
-library(tm)
-library("wordcloud")
 
 # create meta data 
 metadata_df <- data.frame(cld2 = lang_brokered_EN$post_text_cld2)
@@ -2632,7 +2483,6 @@ prep <- prepDocuments(
   verbose = TRUE
 )
 
-str(prep$meta)
 
 # Removing 5012 of 6844 terms (6993 of 31853 tokens) due to frequency 
 # Removing 1 Documents with No Words 
@@ -2687,7 +2537,7 @@ cloud(stm_k5, topic = 1, scale = c(2, 0.25))
 
 
 stm_k6 <- stm(prep$documents, prep$vocab, K = 6, data = prep$meta, init.type = "Spectral") # this is the best model: Balanced topic resolution (not too coarse like K=5, not too fragmented like K=8).
-labelTopics(stm_k6, n = 20)
+topic_labels <- labelTopics(stm_k6, n = 20)
 cloud(stm_k6, topic = 1, scale = c(2, 0.25))
 saveRDS(stm_k6, "ST_Model_K6") # save best fitting Model
 stm_k6  <- readRDS("ST_Model_K6.rds")
@@ -2728,7 +2578,7 @@ plot(stm_k6, type = "summary", xlim = c(0, 0.3))
 
 # plot per covariate
 
-# for model with k6
+# estimate parameters for model with k6
 estimate_k6 <- estimateEffect(1:6 ~ cld2, 
                           stm_k6, 
                           meta = prep$meta, 
@@ -2765,9 +2615,9 @@ mtext("Source: Author’s calculation using the stm package",
 
 ```
 
-```{r Topic Model appendix}
+```{r Topic Modelling appendix}
 
-# create word clouds
+# create word clouds / excluded from Appendix 
 # word clouds for each topic 
 for (i in 1:6) {
   cloud(stm_k6, topic = i, scale = c(2, 0.25))
@@ -2797,7 +2647,7 @@ for (i in 1:6) {
     "FREX words" = paste(topic_labels$frex[i, ], collapse = ", ")
   )
   
-  topic_label_df <- bind_rows(topic_label_df, topics)  # Append in correct order
+  topic_label_df <- bind_rows(topic_label_df, topics)  
 }
   
 
